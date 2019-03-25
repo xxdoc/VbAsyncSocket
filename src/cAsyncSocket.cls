@@ -140,6 +140,10 @@ Private Const PM_REMOVE                     As Long = 1
 '--- for FormatMessage
 Private Const FORMAT_MESSAGE_FROM_SYSTEM    As Long = &H1000
 Private Const FORMAT_MESSAGE_IGNORE_INSERTS As Long = &H200
+'--- for thunks
+Private Const MEM_COMMIT                    As Long = &H1000
+Private Const PAGE_EXECUTE_READWRITE        As Long = &H40
+Private Const CRYPT_STRING_BASE64           As Long = 1
 
 Private Declare Sub CopyMemory Lib "kernel32" Alias "RtlMoveMemory" (Destination As Any, Source As Any, ByVal Length As Long)
 Private Declare Function lstrlen Lib "kernel32" Alias "lstrlenA" (ByVal lpString As Long) As Long
@@ -152,7 +156,6 @@ Private Declare Function WideCharToMultiByte Lib "kernel32" (ByVal CodePage As L
 Private Declare Function MultiByteToWideChar Lib "kernel32" (ByVal CodePage As Long, ByVal dwFlags As Long, lpMultiByteStr As Any, ByVal cchMultiByte As Long, ByVal lpWideCharStr As Long, ByVal cchWideChar As Long) As Long
 Private Declare Function ws_connect Lib "ws2_32" Alias "connect" (ByVal s As Long, ByRef Name As SOCKADDR_IN, ByVal namelen As Long) As Long
 Private Declare Function ws_socket Lib "ws2_32" Alias "socket" (ByVal af As Long, ByVal s_type As Long, ByVal Protocol As Long) As Long
-Private Declare Function ws_closesocket Lib "ws2_32" Alias "closesocket" (ByVal s As Long) As Long
 Private Declare Function ws_bind Lib "ws2_32" Alias "bind" (ByVal s As Long, ByRef Name As SOCKADDR_IN, ByRef namelen As Long) As Long
 Private Declare Function ws_htonl Lib "ws2_32" Alias "htonl" (ByVal hostlong As Long) As Long
 Private Declare Function ws_htons Lib "ws2_32" Alias "htons" (ByVal hostshort As Long) As Integer
@@ -186,6 +189,12 @@ Private Declare Function WSACancelAsyncRequest Lib "ws2_32" (ByVal hAsyncTaskHan
 #If Not ImplUseShared Then
     Private Declare Function QueryPerformanceCounter Lib "kernel32" (lpPerformanceCount As Currency) As Long
     Private Declare Function QueryPerformanceFrequency Lib "kernel32" (lpFrequency As Currency) As Long
+    '--- for thunks
+    Private Declare Function VirtualAlloc Lib "kernel32" (ByVal lpAddress As Long, ByVal dwSize As Long, ByVal flAllocationType As Long, ByVal flProtect As Long) As Long
+    Private Declare Function CryptStringToBinary Lib "crypt32" Alias "CryptStringToBinaryA" (ByVal pszString As String, ByVal cchString As Long, ByVal dwFlags As Long, ByVal pbBinary As Long, pcbBinary As Long, Optional ByVal pdwSkip As Long, Optional ByVal pdwFlags As Long) As Long
+    Private Declare Function CallWindowProc Lib "user32" Alias "CallWindowProcA" (ByVal lpPrevWndFunc As Long, ByVal hWnd As Long, ByVal Msg As Long, ByVal wParam As Long, ByVal lParam As Long) As Long
+    Private Declare Function GetModuleHandle Lib "kernel32" Alias "GetModuleHandleA" (ByVal lpModuleName As String) As Long
+    Private Declare Function GetProcAddress Lib "kernel32" (ByVal hModule As Long, ByVal lpProcName As String) As Long
 #End If
 
 Private Type SOCKADDR_IN
@@ -225,6 +234,7 @@ Private m_cMsgQueue             As Collection
 Private m_uGetHostByName        As UcsAsyncGetHostByNameType
 Private m_bBlocking             As Boolean
 Private m_lLastError            As Long
+Private m_pCleanup              As IUnknown
 
 Private Type UcsAsyncGetHostByNameType
     Handle          As Long
@@ -301,6 +311,7 @@ Public Function Create( _
         m_lLastError = Err.LastDllError
         GoTo QH
     End If
+    Set m_pCleanup = InitCleanupThunk(m_hSocket, "ws2_32", "closesocket")
     If Not m_oHelperWindow.frAddSocket(Me, m_lIndex) Then
         m_lLastError = WSAEMFILE
         Close_
@@ -502,7 +513,7 @@ Public Sub Close_()
     If m_hSocket <> INVALID_SOCKET Then
         Call WSAAsyncSelect(m_hSocket, m_oHelperWindow.hWnd, 0, 0)
         Call ws_shutdown(m_hSocket, 1)
-        Call ws_closesocket(m_hSocket)
+        Set m_pCleanup = Nothing
         m_oHelperWindow.frRemoveSocket Me, m_lIndex
         m_hSocket = INVALID_SOCKET
     End If
@@ -1323,6 +1334,9 @@ Public Function SyncWaitForEvent( _
         If PeekMessage(uMsg, hWnd, WM_SOCKET_NOTIFY + m_lIndex, WM_SOCKET_NOTIFY + m_lIndex, PM_REMOVE) <> 0 Then
             If uMsg.wParam <> INVALID_SOCKET And uMsg.lParam <> 0 Then
                 If uMsg.wParam = m_hSocket Then
+                    If m_cMsgQueue Is Nothing Then
+                        Set m_cMsgQueue = New Collection
+                    End If
                     m_cMsgQueue.Add Array(WM_SOCKET_NOTIFY, uMsg.wParam, uMsg.lParam)
                     If (uMsg.lParam And EventMask) <> 0 Then
                         '--- success
@@ -1394,8 +1408,10 @@ Public Function SyncWaitForEvent( _
     End If
 QH:
     m_bBlocking = bBlocking
-    If m_cMsgQueue.Count > 0 Then
-        Call PostMessage(hWnd, WM_SOCKET_NOTIFY + m_lIndex, INVALID_SOCKET, 0)
+    If Not m_cMsgQueue Is Nothing Then
+        If m_cMsgQueue.Count > 0 Then
+            Call PostMessage(hWnd, WM_SOCKET_NOTIFY + m_lIndex, INVALID_SOCKET, 0)
+        End If
     End If
     Exit Function
 EH:
@@ -1411,16 +1427,18 @@ Public Sub SyncProcessMsgQueue()
     Dim vElem           As Variant
     
     On Error GoTo EH
-    Do While m_cMsgQueue.Count > 0
-        vElem = m_cMsgQueue.Item(1)
-        m_cMsgQueue.Remove 1
-        Select Case vElem(0)
-        Case WM_SOCKET_NOTIFY
-            pvDoNotify vElem(1), vElem(2)
-        Case WM_SOCKET_RESOLVE
-            pvDoResolve vElem(1), vElem(2)
-        End Select
-    Loop
+    If Not m_cMsgQueue Is Nothing Then
+        Do While m_cMsgQueue.Count > 0
+            vElem = m_cMsgQueue.Item(1)
+            m_cMsgQueue.Remove 1
+            Select Case vElem(0)
+            Case WM_SOCKET_NOTIFY
+                pvDoNotify vElem(1), vElem(2)
+            Case WM_SOCKET_RESOLVE
+                pvDoResolve vElem(1), vElem(2)
+            End Select
+        Loop
+    End If
     Exit Sub
 EH:
     PrintError FUNC_NAME
@@ -1447,6 +1465,27 @@ Private Property Get TimerEx() As Double
     Call QueryPerformanceCounter(cValue)
     TimerEx = cValue / cFreq
 End Property
+
+Private Function InitCleanupThunk(ByVal hHandle As Long, sModuleName As String, sProcName As String) As IUnknown
+    Const STR_THUNK     As String = "6AAAAABag+oFgepQEPkAV1aLdCQUgz4AdCeL+oHHPBH5AIvCBcwQ+QCri8IFCBH5AKuLwgUYEfkAq7kCAAAA86WBwjwR+QBSahD/Ugxai/iLwqu4AQAAAKuLRCQMq4tEJBCrg+8Qi0QkGIk4Xl+4UBH5AC1QEPkAwhAAkItEJAiDOAB1KoN4BAB1JIF4CMAAAAB1G4F4DAAAAEZ1EotUJAT/QgSLRCQMiRAzwMIMALgCQACAwgwAkItUJAT/QgSLQgTCBAAPHwCLVCQE/0oEi0IEg/gAfxL/cgj/UgyLVCQEiwpS/1EQM8DCBAA=" ' 22.3.2019 10:19:28
+    Const THUNK_SIZE    As Long = 256
+    Static hThunk       As Long
+    Dim aParams(0 To 1) As Long
+    Dim pfnCleanup      As Long
+    Dim lSize           As Long
+    
+    If hThunk = 0 Then
+        hThunk = VirtualAlloc(0, THUNK_SIZE, MEM_COMMIT, PAGE_EXECUTE_READWRITE)
+        Call CryptStringToBinary(STR_THUNK, Len(STR_THUNK), CRYPT_STRING_BASE64, hThunk, THUNK_SIZE)
+        aParams(0) = GetProcAddress(GetModuleHandle("ole32"), "CoTaskMemAlloc")
+        aParams(1) = GetProcAddress(GetModuleHandle("ole32"), "CoTaskMemFree")
+    End If
+    pfnCleanup = GetProcAddress(GetModuleHandle(sModuleName), sProcName)
+    If pfnCleanup <> 0 Then
+        lSize = CallWindowProc(hThunk, hHandle, pfnCleanup, VarPtr(aParams(0)), VarPtr(InitCleanupThunk))
+        Debug.Assert lSize = THUNK_SIZE
+    End If
+End Function
 #End If
 
 '=========================================================================
@@ -1467,7 +1506,6 @@ Private Sub Class_Initialize()
     End If
     m_hSocket = INVALID_SOCKET
     m_lIndex = -1
-    Set m_cMsgQueue = New Collection
 End Sub
 
 Private Sub Class_Terminate()
