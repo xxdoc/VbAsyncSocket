@@ -1,16 +1,41 @@
 VERSION 5.00
 Begin VB.Form Form1 
    Caption         =   "Form1"
-   ClientHeight    =   5904
+   ClientHeight    =   6336
    ClientLeft      =   108
    ClientTop       =   456
-   ClientWidth     =   5436
+   ClientWidth     =   5448
    LinkTopic       =   "Form1"
-   ScaleHeight     =   5904
-   ScaleWidth      =   5436
+   ScaleHeight     =   6336
+   ScaleWidth      =   5448
    StartUpPosition =   3  'Windows Default
+   Begin VB.TextBox txtBandwidth 
+      Height          =   288
+      Left            =   4452
+      TabIndex        =   17
+      Text            =   "1024"
+      Top             =   5376
+      Width           =   852
+   End
+   Begin VB.CheckBox chkRateLimit 
+      Caption         =   "Rate limit (KB/s):"
+      Height          =   264
+      Left            =   2688
+      TabIndex        =   16
+      Top             =   5376
+      Value           =   1  'Checked
+      Width           =   1608
+   End
+   Begin VB.CommandButton Command12 
+      Caption         =   "HttpUpload"
+      Height          =   432
+      Left            =   168
+      TabIndex        =   15
+      Top             =   5796
+      Width           =   2364
+   End
    Begin VB.CommandButton Command11 
-      Caption         =   "cHttpDownload"
+      Caption         =   "HttpDownload"
       Height          =   432
       Left            =   168
       TabIndex        =   14
@@ -145,6 +170,8 @@ Private WithEvents m_oRequest As cWinSockRequest
 Attribute m_oRequest.VB_VarHelpID = -1
 Private WithEvents m_oHttpDownload As cHttpDownload
 Attribute m_oHttpDownload.VB_VarHelpID = -1
+Private m_oRateLimiter As cRateLimiter
+Private m_dblStartTimerEx As Double
 
 Private Sub Command1_Click()
     Dim sName As String
@@ -269,7 +296,8 @@ Private Sub Command2_Click()
     Screen.MousePointer = vbHourglass
     Set m_oRequest = New cWinSockRequest
     m_oRequest.SetTimeouts 0, 5000, 5000, 5000, 50
-    m_oRequest.Open_ "vws03:100", Async:=(Check1.Value = vbChecked)
+'    m_oRequest.Open_ "vws03:100", Async:=(Check1.Value = vbChecked)
+    m_oRequest.Open_ "localhost:8081", Async:=(Check1.Value = vbChecked)
     m_oRequest.Send "GET /product/likyor-trakiyska-roza-0-2-podarachna-kutia-likyor-trakiyska-roza-7305 HTTP/1.1" & vbCrLf & _
         "Host: vws03:100" & vbCrLf & _
         "Connection: " & IIf(Check2.Value = vbChecked, "keep-alive", "close") & vbCrLf & vbCrLf
@@ -728,9 +756,19 @@ Private Sub Command11_Click()
 '    m_oHttpDownload.DownloadFile "http://www.unicontsoft.com/forum", Environ$("TMP") & "\aaa.html"
 End Sub
 
+Private Sub m_oHttpDownload_OperationStart()
+    m_dblStartTimerEx = TimerEx
+    If chkRateLimit.Value = vbChecked And Val(txtBandwidth.Text) > 0 Then
+        Set m_oRateLimiter = New cRateLimiter
+        m_oRateLimiter.Init m_oHttpDownload.Socket, Val(txtBandwidth.Text) * 1024
+    Else
+        Set m_oRateLimiter = Nothing
+    End If
+End Sub
+
 Private Sub m_oHttpDownload_DownloadProgress(ByVal BytesRead As Double, ByVal BytesTotal As Double)
-    Debug.Print Format$(TimerEx, "0.000"), BytesRead & " from " & BytesTotal
-    Caption = BytesRead & " from " & BytesTotal
+    Debug.Print Format$(TimerEx, "0.000"), "Downloaded " & BytesRead & " from " & BytesTotal & " @ " & Format$(BytesRead / (TimerEx - m_dblStartTimerEx) / 1024, "0.0") & "KB/s"
+    Caption = "Downloaded " & BytesRead & " from " & BytesTotal
 '    If BytesRead > 2000000 Then
 '        m_oHttpDownload.CancelDownload
 '    End If
@@ -741,7 +779,22 @@ Private Sub m_oHttpDownload_DownloadComplete(ByVal LocalFileName As String)
     MsgBox "Download to " & LocalFileName & " complete", vbExclamation
 End Sub
 
-Private Sub m_oHttpDownload_DownloadError(ByVal Number As Long, ByVal Description As String)
+Private Sub m_oHttpDownload_OperationError(ByVal Number As Long, ByVal Description As String)
     Debug.Print Format$(TimerEx, "0.000"), Hex$(Number) & ": " & Description
     MsgBox Description, vbCritical, TypeName(m_oHttpDownload)
+End Sub
+
+Private Sub Command12_Click()
+    Set m_oHttpDownload = New cHttpDownload
+    m_oHttpDownload.UploadFile "http://www.unicontsoft.com/upload_errors.php?id=deldeldel", Environ$("TMP") & "\aaa.gif"
+End Sub
+
+Private Sub m_oHttpDownload_UploadProgress(ByVal BytesWritten As Double, ByVal BytesTotal As Double)
+    Debug.Print Format$(TimerEx, "0.000"), "Uploaded " & BytesWritten & " of " & BytesTotal & " @ " & Format$(BytesWritten / (TimerEx - m_dblStartTimerEx) / 1024, "0.0") & "KB/s"
+    Caption = "Uploaded " & BytesWritten & " of " & BytesTotal
+End Sub
+
+Private Sub m_oHttpDownload_UploadComplete(ByVal LocalFileName As String)
+    Debug.Print Format$(TimerEx, "0.000"), "Upload of " & LocalFileName & " complete"
+    MsgBox "Upload of " & LocalFileName & " complete", vbExclamation
 End Sub

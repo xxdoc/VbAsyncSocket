@@ -41,6 +41,7 @@ Event OnReceive()
 Event OnSend()
 Event OnError(ByVal ErrorCode As Long, ByVal EventMask As UcsAsyncSocketEventMaskEnum)
 Event OnMessagePending(Handled As Boolean)
+Event BeforeNotify(ByVal EventMask As UcsAsyncSocketEventMaskEnum, Cancel As Boolean)
 
 '=========================================================================
 ' Public enums
@@ -157,9 +158,10 @@ Private Declare Function FormatMessage Lib "kernel32" Alias "FormatMessageA" (By
 Private Declare Function PostMessage Lib "user32" Alias "PostMessageA" (ByVal hWnd As Long, ByVal wMsg As Long, ByVal wParam As Long, ByVal lParam As Long) As Long
 Private Declare Function WideCharToMultiByte Lib "kernel32" (ByVal CodePage As Long, ByVal dwFlags As Long, ByVal lpWideCharStr As Long, ByVal cchWideChar As Long, lpMultiByteStr As Any, ByVal cchMultiByte As Long, ByVal lpDefaultChar As Long, ByVal lpUsedDefaultChar As Long) As Long
 Private Declare Function MultiByteToWideChar Lib "kernel32" (ByVal CodePage As Long, ByVal dwFlags As Long, lpMultiByteStr As Any, ByVal cchMultiByte As Long, ByVal lpWideCharStr As Long, ByVal cchWideChar As Long) As Long
-Private Declare Function CreateWindowEx Lib "user32" Alias "CreateWindowExA" (ByVal dwExStyle As Long, ByVal lpClassName As String, ByVal lpWindowName As String, ByVal dwStyle As Long, ByVal X As Long, ByVal Y As Long, ByVal nWidth As Long, ByVal nHeight As Long, ByVal hWndParent As Long, ByVal hMenu As Long, ByVal hInstance As Long, lpParam As Any) As Long
+Private Declare Function CreateWindowEx Lib "user32" Alias "CreateWindowExA" (ByVal dwExStyle As Long, ByVal lpClassName As String, ByVal lpWindowName As String, ByVal dwStyle As Long, ByVal lX As Long, ByVal lY As Long, ByVal nWidth As Long, ByVal nHeight As Long, ByVal hWndParent As Long, ByVal hMenu As Long, ByVal hInstance As Long, lpParam As Any) As Long
 Private Declare Function SetWindowLong Lib "user32" Alias "SetWindowLongA" (ByVal hWnd As Long, ByVal nIndex As Long, ByVal dwNewLong As Long) As Long
 Private Declare Function vbaObjSetAddref Lib "msvbvm60" Alias "__vbaObjSetAddref" (oDest As Any, ByVal lSrcPtr As Long) As Long
+Private Declare Function GetCurrentProcessId Lib "kernel32" () As Long
 Private Declare Function WSAStartup Lib "ws2_32" (ByVal wVersionRequired As Long, lpWSAData As Any) As Long
 Private Declare Function WSACleanup Lib "ws2_32" () As Long
 Private Declare Function WSAAsyncGetHostByName Lib "ws2_32" (ByVal hWnd As Long, ByVal wMsg As Long, ByVal strHostName As String, buf As Any, ByVal BufLen As Long) As Long
@@ -180,7 +182,7 @@ Private Declare Function ws_getpeername Lib "ws2_32" Alias "getpeername" (ByVal 
 Private Declare Function ws_getsockname Lib "ws2_32" Alias "getsockname" (ByVal s As Long, ByRef Name As SOCKADDR_IN, ByRef namelen As Long) As Long
 Private Declare Function ws_shutdown Lib "ws2_32" Alias "shutdown" (ByVal s As Long, ByVal How As Long) As Long
 Private Declare Function ws_listen Lib "ws2_32" Alias "listen" (ByVal s As Long, ByVal backlog As Long) As Long
-Private Declare Function ws_accept Lib "ws2_32" Alias "accept" (ByVal s As Long, addr As Any, addrlen As Any) As Long
+Private Declare Function ws_accept Lib "ws2_32" Alias "accept" (ByVal s As Long, Addr As Any, addrlen As Any) As Long
 Private Declare Function ws_ioctlsocket Lib "ws2_32" Alias "ioctlsocket" (ByVal s As Long, ByVal cmd As Long, argp As Long) As Long
 Private Declare Function ws_getsockopt Lib "ws2_32" Alias "getsockopt" (ByVal s As Long, ByVal Level As Long, ByVal optname As Long, optval As Any, optlen As Long) As Long
 Private Declare Function ws_setsockopt Lib "ws2_32" Alias "setsockopt" (ByVal s As Long, ByVal Level As Long, ByVal optname As Long, optval As Any, ByVal optlen As Long) As Long
@@ -205,10 +207,7 @@ Private Declare Function ws_gethostname Lib "ws2_32" Alias "gethostname" (ByVal 
     Private Declare Function GetProcAddress Lib "kernel32" (ByVal hModule As Long, ByVal lpProcName As String) As Long
     Private Declare Function GetProcAddressByOrdinal Lib "kernel32" Alias "GetProcAddress" (ByVal hModule As Long, ByVal lpProcOrdinal As Long) As Long
     Private Declare Function DefSubclassProc Lib "comctl32" Alias "#413" (ByVal hWnd As Long, ByVal wMsg As Long, ByVal wParam As Long, ByVal lParam As Long) As Long
-    #If Not ImplNoIdeProtection Then
-        Private Declare Function GetWindowThreadProcessId Lib "user32" (ByVal hWnd As Long, lpdwProcessId As Long) As Long
-        Private Declare Function GetCurrentProcessId Lib "kernel32" () As Long
-    #End If
+    Private Declare Function GetWindowThreadProcessId Lib "user32" (ByVal hWnd As Long, lpdwProcessId As Long) As Long
     Private Declare Function GetEnvironmentVariable Lib "kernel32" Alias "GetEnvironmentVariableA" (ByVal lpName As String, ByVal lpBuffer As String, ByVal nSize As Long) As Long
     Private Declare Function SetEnvironmentVariable Lib "kernel32" Alias "SetEnvironmentVariableA" (ByVal lpName As String, ByVal lpValue As String) As Long
     '--- end MST
@@ -251,6 +250,7 @@ Private m_pCleanup              As IUnknown
 Private m_oHelperWindow         As cAsyncSocket
 Private m_lIndex                As Long
 Private m_lLastError            As Long
+Private m_lLastSendBytes        As Long
 Private m_uGetHostByName()      As UcsAsyncGetHostByNameType
 Private m_uWindowState()        As UcsHelperWindowStateType
 #If ImplSync Then
@@ -307,6 +307,10 @@ Property Get AvailableBytes() As Long
     If Not IOCtl(FIONREAD, AvailableBytes) Then
         AvailableBytes = SOCKET_ERROR
     End If
+End Property
+
+Property Get LastSendBytes() As Long
+    LastSendBytes = m_lLastSendBytes
 End Property
 
 Property Get HasPendingEvent() As Boolean
@@ -557,7 +561,9 @@ EH:
 End Function
 
 Public Sub Close_()
-    '--- note: used in terminate -> no error handling
+    Const FUNC_NAME     As String = "Close_"
+    
+    On Error GoTo EH
     If pvResolveHandle <> 0 Then
         Call WSACancelAsyncRequest(m_uGetHostByName(0).Handle)
         Erase m_uGetHostByName
@@ -566,6 +572,9 @@ Public Sub Close_()
         Call ws_shutdown(m_hSocket, 1)
         pvClose
     End If
+    Exit Sub
+EH:
+    PrintError FUNC_NAME
 End Sub
 
 Public Function Connect(HostAddress As String, ByVal HostPort As Long) As Boolean
@@ -794,6 +803,7 @@ Public Function Send( _
             GoTo QH
         End If
     End If
+    m_lLastSendBytes = BufLen
     If uAddr.sin_family <> 0 Then
         Send = ws_sendto(m_hSocket, ByVal BufPtr, BufLen, Flags, uAddr, LenB(uAddr))
     Else
@@ -846,11 +856,15 @@ EH:
     PrintError FUNC_NAME
 End Function
 
-Public Sub PostEvent(ByVal EventMask As UcsAsyncSocketEventMaskEnum)
+Public Sub PostEvent(ByVal EventMask As UcsAsyncSocketEventMaskEnum, Optional ByVal Immediate As Boolean)
     Const FUNC_NAME     As String = "PostEvent"
     
     On Error GoTo EH
-    Call PostMessage(m_oHelperWindow.frMessageHWnd, WM_SOCKET_NOTIFY + m_lIndex, m_hSocket, EventMask)
+    If Immediate Then
+        pvDoNotify m_hSocket, EventMask
+    Else
+        Call PostMessage(m_oHelperWindow.frMessageHWnd, WM_SOCKET_NOTIFY + m_lIndex, m_hSocket, EventMask)
+    End If
     Exit Sub
 EH:
     PrintError FUNC_NAME
@@ -928,88 +942,85 @@ End Function
 
 Private Sub pvDoNotify(ByVal wParam As Long, ByVal lParam As Long)
     Dim eEvent          As UcsAsyncSocketEventMaskEnum
-    Dim lErrorCode      As Long
+    Dim bCancel         As Boolean
     Dim lBytes          As Long
 
-    If m_hSocket = wParam Then
-        eEvent = lParam And &HFFFF&
-        lErrorCode = lParam \ &H10000
-        If lErrorCode <> 0 Then
-            m_lLastError = lErrorCode
-            RaiseEvent OnError(lErrorCode, eEvent)
-        Else
-            Select Case eEvent
-            Case ucsSfdRead
-                If Not IOCtl(FIONREAD, lBytes) Then
-                    RaiseEvent OnError(m_lLastError, eEvent)
-                    If m_hSocket = INVALID_SOCKET Then
-                        GoTo QH
-                    End If
-                End If
-                If lBytes <> 0 Then
-                    m_lLastError = 0
-                    RaiseEvent OnReceive
-                End If
-            Case [_ucsSfdForceRead]
-                m_lLastError = 0
-                RaiseEvent OnReceive
-            Case ucsSfdWrite
-                m_lLastError = 0
-                RaiseEvent OnSend
-            Case ucsSfdConnect
-                m_lLastError = 0
-                RaiseEvent OnConnect
-            Case ucsSfdAccept
-                m_lLastError = 0
-                RaiseEvent OnAccept
-            Case ucsSfdClose
-                m_lLastError = 0
-                RaiseEvent OnClose
-            End Select
-        End If
+    If m_hSocket <> wParam Then
+        GoTo QH
     End If
+    eEvent = lParam And &HFFFF&
+    m_lLastError = lParam \ &H10000
+    If m_lLastError <> 0 Then
+        RaiseEvent OnError(m_lLastError, eEvent)
+        GoTo QH
+    End If
+    RaiseEvent BeforeNotify(eEvent, bCancel)
+    If bCancel Then
+        GoTo QH
+    End If
+    Select Case eEvent
+    Case ucsSfdRead
+        If Not IOCtl(FIONREAD, lBytes) Then
+            RaiseEvent OnError(m_lLastError, eEvent)
+            If m_hSocket = INVALID_SOCKET Then
+                GoTo QH
+            End If
+        End If
+        If lBytes <> 0 Then
+            RaiseEvent OnReceive
+        End If
+    Case [_ucsSfdForceRead]
+        RaiseEvent OnReceive
+    Case ucsSfdWrite
+        RaiseEvent OnSend
+    Case ucsSfdConnect
+        RaiseEvent OnConnect
+    Case ucsSfdAccept
+        RaiseEvent OnAccept
+    Case ucsSfdClose
+        RaiseEvent OnClose
+    End Select
 QH:
 End Sub
 
 Private Sub pvDoResolve(ByVal wParam As Long, ByVal lParam As Long)
-    Dim lErrorCode      As Long
     Dim uAddr           As SOCKADDR_IN
     Dim lPtr            As Long
     
-    If pvResolveHandle = wParam Then
-        lErrorCode = lParam \ &H10000
-        If lErrorCode <> 0 Then
-            Erase m_uGetHostByName
-            m_lLastError = lErrorCode
-            RaiseEvent OnError(lErrorCode, [_ucsSfdResolve])
+    If pvResolveHandle <> wParam Then
+        GoTo QH
+    End If
+    m_lLastError = lParam \ &H10000
+    If m_lLastError <> 0 Then
+        Erase m_uGetHostByName
+        RaiseEvent OnError(m_lLastError, [_ucsSfdResolve])
+        GoTo QH
+    End If
+    uAddr.sin_family = AF_INET
+    uAddr.sin_port = ws_htons(m_uGetHostByName(0).Port)
+    '--- set sin_addr to first IP address resolved
+    Call CopyMemory(lPtr, m_uGetHostByName(0).Buffer(12), 4)
+    Call CopyMemory(lPtr, ByVal lPtr, 4)
+    Call CopyMemory(uAddr.sin_addr, ByVal lPtr, 4)
+    Erase m_uGetHostByName
+    m_lLastError = 0
+    RaiseEvent OnResolve(pvToString(ws_inet_ntoa(uAddr.sin_addr)))
+    If m_hSocket = INVALID_SOCKET Then
+        m_lLastError = WSAEINTR
+        GoTo QH
+    End If
+    If SockOpt(ucsSsoType) = ucsSckStream Then
+        '--- note uAddr is prepared above, before m_uGetHostByName being erased
+        If ws_connect(m_hSocket, uAddr, LenB(uAddr)) = SOCKET_ERROR Then
+            m_lLastError = Err.LastDllError
+            If m_lLastError <> WSAEWOULDBLOCK Then
+                RaiseEvent OnError(m_lLastError, ucsSfdConnect)
+            End If
         Else
-            uAddr.sin_family = AF_INET
-            uAddr.sin_port = ws_htons(m_uGetHostByName(0).Port)
-            '--- set sin_addr to first IP address resolved
-            Call CopyMemory(lPtr, m_uGetHostByName(0).Buffer(12), 4)
-            Call CopyMemory(lPtr, ByVal lPtr, 4)
-            Call CopyMemory(uAddr.sin_addr, ByVal lPtr, 4)
-            Erase m_uGetHostByName
-            m_lLastError = 0
-            RaiseEvent OnResolve(pvToString(ws_inet_ntoa(uAddr.sin_addr)))
-            If m_hSocket = INVALID_SOCKET Then
-                m_lLastError = WSAEINTR
-                GoTo QH
-            End If
-            If SockOpt(ucsSsoType) = ucsSckStream Then
-                '--- note uAddr is prepared above, before m_uGetHostByName being erased
-                If ws_connect(m_hSocket, uAddr, LenB(uAddr)) = SOCKET_ERROR Then
-                    m_lLastError = Err.LastDllError
-                    If m_lLastError <> WSAEWOULDBLOCK Then
-                        RaiseEvent OnError(m_lLastError, ucsSfdConnect)
-                    End If
-                Else
-                    PostEvent ucsSfdConnect
-                End If
-            Else
-                PostEvent ucsSfdConnect
-            End If
+            PostEvent ucsSfdConnect
         End If
+    Else
+        PostEvent ucsSfdConnect
     End If
 QH:
 End Sub
@@ -1139,7 +1150,6 @@ EH:
     PrintError FUNC_NAME
 End Function
 
-
 Public Function SyncReceiveArray( _
             Buffer() As Byte, _
             Optional ByVal NeedLen As Long, _
@@ -1248,7 +1258,11 @@ Public Function SyncReceive( _
             If Not SyncWaitForEvent(Timeout, ucsSfdRead) Then
                 GoTo QH
             End If
-        ElseIf lResult > 0 Then
+        ElseIf lResult = 0 Then
+            If Not SyncWaitForEvent(Timeout, ucsSfdRead) Then
+                GoTo QH
+            End If
+        Else
             If uAddr.sin_family <> 0 Then
                 pvFromSockAddr uAddr, HostAddress, HostPort
             End If
@@ -1617,6 +1631,7 @@ Private Property Get pvAddressOfSubclassProc() As cAsyncSocket
 End Property
 
 Public Function SubclassProc(ByVal hWnd As Long, ByVal wMsg As Long, ByVal wParam As Long, ByVal lParam As Long, Handled As Boolean) As Long
+Attribute SubclassProc.VB_MemberFlags = "40"
     #If hWnd Then '--- touch args
     #End If
     SubclassProc = pvHandleNotify(wMsg, wParam, lParam, Handled)
@@ -1756,12 +1771,12 @@ Private Property Get pvThunkGlobalData(sKey As String) As Long
     Dim sBuffer     As String
     
     sBuffer = String$(50, 0)
-    Call GetEnvironmentVariable("_MST_GLOBAL" & App.hInstance & "_" & sKey, sBuffer, Len(sBuffer) - 1)
+    Call GetEnvironmentVariable("_MST_GLOBAL" & GetCurrentProcessId() & "_" & sKey, sBuffer, Len(sBuffer) - 1)
     pvThunkGlobalData = Val(Left$(sBuffer, InStr(sBuffer, vbNullChar) - 1))
 End Property
 
 Private Property Let pvThunkGlobalData(sKey As String, ByVal lValue As Long)
-    Call SetEnvironmentVariable("_MST_GLOBAL" & App.hInstance & "_" & sKey, lValue)
+    Call SetEnvironmentVariable("_MST_GLOBAL" & GetCurrentProcessId() & "_" & sKey, lValue)
 End Property
 #End If
 
@@ -1775,7 +1790,7 @@ Private Sub Class_Initialize()
     Dim lPtr            As Long
     Dim baWSAData()     As Byte
     
-    sHelperName = App.hInstance & ":" & App.ThreadID & ":" & STR_HELPER_NAME
+    sHelperName = GetCurrentProcessId() & ":" & App.ThreadID & ":" & STR_HELPER_NAME
     hWndHelper = FindWindowEx(HWND_MESSAGE, 0, STR_HELPER_CLASS, sHelperName)
     lPtr = GetWindowLong(hWndHelper, GWL_USERDATA)
     If hWndHelper = 0 Or lPtr <> 0 Then
@@ -1807,7 +1822,7 @@ End Sub
 
 Private Sub Class_Terminate()
     If frMessageHWnd = 0 Then
-        Close_
+        pvClose
         Set m_oHelperWindow = Nothing
     Else
         '-- terminate helper window
