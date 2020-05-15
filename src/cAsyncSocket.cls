@@ -13,7 +13,7 @@ Attribute VB_PredeclaredId = False
 Attribute VB_Exposed = False
 '=========================================================================
 '
-' VbAsyncSocket Project (c) 2018-2019 by wqweto@gmail.com
+' VbAsyncSocket Project (c) 2018-2020 by wqweto@gmail.com
 '
 ' Simple and thin WinSock API wrappers for VB6
 '
@@ -28,6 +28,7 @@ Private Const MODULE_NAME As String = "cAsyncSocket"
 #Const ImplUseShared = (ASYNCSOCKET_USE_SHARED <> 0)
 #Const ImplSync = Not (ASYNCSOCKET_NO_SYNC <> 0)
 #Const ImplNoIdeProtection = (MST_NO_IDE_PROTECTION <> 0)
+#Const ImplUseDebugLog = (USE_DEBUG_LOG <> 0)
 
 '=========================================================================
 ' Public events
@@ -115,6 +116,7 @@ Private Const AF_INET                       As Long = 2
 Private Const ERR_TIMEOUT                   As Long = &H800705B4
 '--- for ioctlsocket
 Private Const FIONREAD                      As Long = &H4004667F
+Private Const FIONBIO                       As Long = &H8004667E
 '--- for WSAGetLastError
 Private Const WSABASEERR                    As Long = 10000
 Private Const WSAEINTR                      As Long = (WSABASEERR + 4)
@@ -142,11 +144,11 @@ Private Const PM_NOREMOVE                   As Long = 0
 Private Const PM_REMOVE                     As Long = 1
 '--- for FormatMessage
 Private Const FORMAT_MESSAGE_FROM_SYSTEM    As Long = &H1000
+Private Const FORMAT_MESSAGE_FROM_HMODULE   As Long = &H800
 Private Const FORMAT_MESSAGE_IGNORE_INSERTS As Long = &H200
 '--- for Modern Subclassing Thunk (MST)
 Private Const MEM_COMMIT                    As Long = &H1000
 Private Const PAGE_EXECUTE_READWRITE        As Long = &H40
-Private Const CRYPT_STRING_BASE64           As Long = 1
 Private Const SIGN_BIT                      As Long = &H80000000
 
 Private Declare Sub CopyMemory Lib "kernel32" Alias "RtlMoveMemory" (Destination As Any, Source As Any, ByVal Length As Long)
@@ -154,7 +156,7 @@ Private Declare Function ArrPtr Lib "msvbvm60" Alias "VarPtr" (Ptr() As Any) As 
 Private Declare Function lstrlen Lib "kernel32" Alias "lstrlenA" (ByVal lpString As Long) As Long
 Private Declare Function FindWindowEx Lib "user32" Alias "FindWindowExA" (ByVal hWndParent As Long, ByVal hWndChildAfter As Long, ByVal lpszClass As String, ByVal lpszWindow As String) As Long
 Private Declare Function GetWindowLong Lib "user32" Alias "GetWindowLongA" (ByVal hWnd As Long, ByVal nIndex As Long) As Long
-Private Declare Function FormatMessage Lib "kernel32" Alias "FormatMessageA" (ByVal dwFlags As Long, lpSource As Long, ByVal dwMessageId As Long, ByVal dwLanguageId As Long, ByVal lpBuffer As String, ByVal nSize As Long, Args As Any) As Long
+Private Declare Function FormatMessage Lib "kernel32" Alias "FormatMessageA" (ByVal dwFlags As Long, ByVal lpSource As Long, ByVal dwMessageId As Long, ByVal dwLanguageId As Long, ByVal lpBuffer As String, ByVal nSize As Long, ByVal Args As Long) As Long
 Private Declare Function PostMessage Lib "user32" Alias "PostMessageA" (ByVal hWnd As Long, ByVal wMsg As Long, ByVal wParam As Long, ByVal lParam As Long) As Long
 Private Declare Function WideCharToMultiByte Lib "kernel32" (ByVal CodePage As Long, ByVal dwFlags As Long, ByVal lpWideCharStr As Long, ByVal cchWideChar As Long, lpMultiByteStr As Any, ByVal cchMultiByte As Long, ByVal lpDefaultChar As Long, ByVal lpUsedDefaultChar As Long) As Long
 Private Declare Function MultiByteToWideChar Lib "kernel32" (ByVal CodePage As Long, ByVal dwFlags As Long, lpMultiByteStr As Any, ByVal cchMultiByte As Long, ByVal lpWideCharStr As Long, ByVal cchWideChar As Long) As Long
@@ -162,6 +164,7 @@ Private Declare Function CreateWindowEx Lib "user32" Alias "CreateWindowExA" (By
 Private Declare Function SetWindowLong Lib "user32" Alias "SetWindowLongA" (ByVal hWnd As Long, ByVal nIndex As Long, ByVal dwNewLong As Long) As Long
 Private Declare Function vbaObjSetAddref Lib "msvbvm60" Alias "__vbaObjSetAddref" (oDest As Any, ByVal lSrcPtr As Long) As Long
 Private Declare Function GetCurrentProcessId Lib "kernel32" () As Long
+Private Declare Function LoadLibrary Lib "kernel32" Alias "LoadLibraryA" (ByVal lpLibFileName As String) As Long
 Private Declare Function WSAStartup Lib "ws2_32" (ByVal wVersionRequired As Long, lpWSAData As Any) As Long
 Private Declare Function WSACleanup Lib "ws2_32" () As Long
 Private Declare Function WSAAsyncGetHostByName Lib "ws2_32" (ByVal hWnd As Long, ByVal wMsg As Long, ByVal strHostName As String, buf As Any, ByVal BufLen As Long) As Long
@@ -194,14 +197,14 @@ Private Declare Function ws_gethostname Lib "ws2_32" Alias "gethostname" (ByVal 
     Private Declare Function DispatchMessage Lib "user32" Alias "DispatchMessageA" (lpMsg As APIMSG) As Long
     Private Declare Function SetTimer Lib "user32" (ByVal hWnd As Long, ByVal nIDEvent As Long, ByVal uElapse As Long, ByVal lpTimerFunc As Long) As Long
     Private Declare Function KillTimer Lib "user32" (ByVal hWnd As Long, ByVal nIDEvent As Long) As Long
-    Private Declare Function WaitMessage Lib "user32" () As Long
+'    Private Declare Function WaitMessage Lib "user32" () As Long
+    Private Declare Sub Sleep Lib "kernel32" (ByVal dwMilliseconds As Long)
 #End If
 #If Not ImplUseShared Then
     Private Declare Function QueryPerformanceCounter Lib "kernel32" (lpPerformanceCount As Currency) As Long
     Private Declare Function QueryPerformanceFrequency Lib "kernel32" (lpFrequency As Currency) As Long
     '--- for Modern Subclassing Thunk (MST)
     Private Declare Function VirtualAlloc Lib "kernel32" (ByVal lpAddress As Long, ByVal dwSize As Long, ByVal flAllocationType As Long, ByVal flProtect As Long) As Long
-    Private Declare Function CryptStringToBinary Lib "crypt32" Alias "CryptStringToBinaryA" (ByVal pszString As String, ByVal cchString As Long, ByVal dwFlags As Long, ByVal pbBinary As Long, pcbBinary As Long, Optional ByVal pdwSkip As Long, Optional ByVal pdwFlags As Long) As Long
     Private Declare Function CallWindowProc Lib "user32" Alias "CallWindowProcA" (ByVal lpPrevWndFunc As Long, ByVal hWnd As Long, ByVal Msg As Long, ByVal wParam As Long, ByVal lParam As Long) As Long
     Private Declare Function GetModuleHandle Lib "kernel32" Alias "GetModuleHandleA" (ByVal lpModuleName As String) As Long
     Private Declare Function GetProcAddress Lib "kernel32" (ByVal hModule As Long, ByVal lpProcName As String) As Long
@@ -266,7 +269,7 @@ End Type
 
 Private Type UcsHelperWindowStateType
     hWnd                As Long
-    Subclass            As IUnknown
+    Notify              As IUnknown
     Cleanup             As IUnknown
     SocketPtr()         As Long
     Pos                 As Long
@@ -278,7 +281,11 @@ End Type
 '=========================================================================
 
 Private Sub PrintError(sFunction As String)
-    Debug.Print "Critical error: " & Err.Description & " [" & MODULE_NAME & "." & sFunction & "]"
+    #If ImplUseDebugLog Then
+        DebugLog MODULE_NAME, sFunction & "(" & Erl & ")", Err.Description & " &H" & Hex$(Err.Number), vbLogEventTypeError
+    #Else
+        Debug.Print "Critical error: " & Err.Description & " [" & MODULE_NAME & "." & sFunction & "]"
+    #End If
 End Sub
 
 '=========================================================================
@@ -291,6 +298,10 @@ End Property
 
 Property Get LastError() As Long
     LastError = m_lLastError
+End Property
+
+Friend Property Let frLastError(ByVal lValue As Long)
+    m_lLastError = lValue
 End Property
 
 Property Get SockOpt(ByVal OptionName As UcsAsyncSocketOptionNameEnum, Optional ByVal Level As UcsAsyncSocketOptionLevelEnum = ucsSolSocket) As Long
@@ -306,6 +317,12 @@ End Property
 Property Get AvailableBytes() As Long
     If Not IOCtl(FIONREAD, AvailableBytes) Then
         AvailableBytes = SOCKET_ERROR
+    End If
+End Property
+
+Property Get BlockingMode() As Long
+    If Not IOCtl(FIONBIO, BlockingMode) Then
+        BlockingMode = SOCKET_ERROR
     End If
 End Property
 
@@ -509,6 +526,9 @@ Public Function Accept(ConnectedSocket As cAsyncSocket, Optional SocketAddress A
         m_lLastError = Err.LastDllError
         GoTo QH
     End If
+    If ConnectedSocket Is Nothing Then
+        Set ConnectedSocket = New cAsyncSocket
+    End If
     If Not ConnectedSocket.Attach(hTemp) Then
         m_lLastError = ConnectedSocket.LastError
         GoTo QH
@@ -677,6 +697,8 @@ Public Function ReceiveArray( _
     Const FUNC_NAME     As String = "ReceiveArray"
     Dim uAddr           As SOCKADDR_IN
     Dim lBytes          As Long
+    Dim lPos            As Long
+    Dim lSize           As Long
     
     On Error GoTo EH
     lBytes = AvailableBytes
@@ -684,15 +706,25 @@ Public Function ReceiveArray( _
         Buffer = vbNullString
     Else
         ReDim Buffer(0 To lBytes - 1) As Byte
-        If HostAddress <> STR_CHR1 Then
-            lBytes = ws_recvfrom(m_hSocket, Buffer(0), lBytes, Flags, uAddr, LenB(uAddr))
-        Else
-            lBytes = ws_recv(m_hSocket, Buffer(0), lBytes, Flags)
-        End If
-        If lBytes = SOCKET_ERROR Then
-            m_lLastError = Err.LastDllError
-            GoTo QH
-        End If
+        Do
+            lPos = lPos + lSize
+            If HostAddress <> STR_CHR1 Then
+                lSize = ws_recvfrom(m_hSocket, Buffer(lPos), lBytes - lPos, Flags, uAddr, LenB(uAddr))
+            Else
+                lSize = ws_recv(m_hSocket, Buffer(lPos), lBytes - lPos, Flags)
+            End If
+            If lSize = SOCKET_ERROR Then
+                m_lLastError = Err.LastDllError
+                GoTo QH
+            ElseIf lSize = 0 Then
+                If lPos = 0 Then
+                    Buffer = vbNullString
+                Else
+                    ReDim Preserve Buffer(0 To lPos - 1) As Byte
+                End If
+                Exit Do
+            End If
+        Loop While lPos + lSize < lBytes
         If uAddr.sin_family <> 0 Then
             pvFromSockAddr uAddr, HostAddress, HostPort
         End If
@@ -844,7 +876,10 @@ Public Function GetErrorDescription(ByVal ErrorCode As Long) As String
     
     On Error GoTo EH
     GetErrorDescription = Space$(2000)
-    lSize = FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM Or FORMAT_MESSAGE_IGNORE_INSERTS, 0&, ErrorCode, 0, GetErrorDescription, Len(GetErrorDescription) + 1, 0)
+    lSize = FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM Or FORMAT_MESSAGE_IGNORE_INSERTS, 0, ErrorCode, 0, GetErrorDescription, Len(GetErrorDescription), 0)
+    If lSize = 0 Then
+        lSize = FormatMessage(FORMAT_MESSAGE_FROM_HMODULE Or FORMAT_MESSAGE_IGNORE_INSERTS, LoadLibrary("mswsock"), ErrorCode, 0, GetErrorDescription, Len(GetErrorDescription), 0)
+    End If
     If lSize > 2 Then
         If Mid$(GetErrorDescription, lSize - 1, 2) = vbCrLf Then
             lSize = lSize - 2
@@ -1108,7 +1143,7 @@ EH:
 End Function
 
 Public Function SyncReceiveText( _
-            Optional ByVal NeedLen As Long, _
+            Optional ByVal NeedLen As Long = 1, _
             Optional ByVal Timeout As Long, _
             Optional HostAddress As String = STR_CHR1, _
             Optional HostPort As Long, _
@@ -1134,10 +1169,12 @@ Public Function SyncReceiveText( _
                 GoTo QH
             End If
         End If
-        bResult = SyncReceiveArray(baBuffer, NeedLen - Len(SyncReceiveText), Timeout - lElapsed, HostAddress, HostPort)
-        ReDim Preserve baText(0 To UBound(baText) + UBound(baBuffer) + 1) As Byte
-        Call CopyMemory(baText(UBound(baText) - UBound(baBuffer)), baBuffer(0), UBound(baBuffer) + 1)
-        SyncReceiveText = FromTextArray(baText, CodePage)
+        bResult = SyncReceiveArray(baBuffer, 0, Timeout - lElapsed, HostAddress, HostPort)
+        If UBound(baBuffer) >= 0 Then
+            ReDim Preserve baText(0 To UBound(baText) + UBound(baBuffer) + 1) As Byte
+            Call CopyMemory(baText(UBound(baText) - UBound(baBuffer)), baBuffer(0), UBound(baBuffer) + 1)
+            SyncReceiveText = FromTextArray(baText, CodePage)
+        End If
         If Not bResult Then
             GoTo QH
         End If
@@ -1285,7 +1322,7 @@ Public Function SyncSendText( _
             Optional HostAddress As String, _
             Optional ByVal HostPort As Long, _
             Optional ByVal CodePage As UcsAsyncSocketCodePageEnum = ucsScpUtf8) As Boolean
-    Const FUNC_NAME     As String = "SendText"
+    Const FUNC_NAME     As String = "SyncSendText"
     
     On Error GoTo EH
     SyncSendText = SyncSendArray(ToTextArray(Text, CodePage), Timeout, HostAddress, HostPort)
@@ -1459,11 +1496,13 @@ Public Function SyncWaitForEvent( _
                 End If
                 bPeek = False
             Else
-                Call WaitMessage
+'                Call WaitMessage
+                Call Sleep(1)
                 bPeek = True
             End If
         Else
-            Call WaitMessage
+'            Call WaitMessage
+            Call Sleep(1)
             bPeek = True
         End If
     Loop
@@ -1584,7 +1623,7 @@ EH:
     GoTo QH
 End Function
 
-Private Function pvHandleNotify(ByVal wMsg As Long, ByVal wParam As Long, ByVal lParam As Long, Handled As Boolean) As Long
+Private Function pvHandleNotify(ByVal wMsg As Long, ByVal wParam As Long, ByVal lParam As Long) As Long
     Const FUNC_NAME     As String = "pvHandleNotify"
     Dim lIdx            As Long
     
@@ -1599,7 +1638,6 @@ Private Function pvHandleNotify(ByVal wMsg As Long, ByVal wParam As Long, ByVal 
                 If .SocketPtr(lIdx) <> 0 Then
                     If pvToSocket(.SocketPtr(lIdx)).frNotifyGetHostByName(wParam, lParam) Then
                         pvHandleNotify = 1
-                        Handled = True
                         GoTo QH
                     End If
                 End If
@@ -1610,7 +1648,6 @@ Private Function pvHandleNotify(ByVal wMsg As Long, ByVal wParam As Long, ByVal 
                 If .SocketPtr(lIdx) <> 0 Then
                     pvToSocket(.SocketPtr(lIdx)).frNotifyEvent wParam, lParam
                     pvHandleNotify = 1
-                    Handled = True
                 End If
             End If
         End Select
@@ -1626,15 +1663,19 @@ Private Function pvToSocket(ByVal lPtr As Long) As cAsyncSocket
     Call vbaObjSetAddref(pvToSocket, lPtr)
 End Function
 
-Private Property Get pvAddressOfSubclassProc() As cAsyncSocket
-    Set pvAddressOfSubclassProc = InitAddressOfMethod(Me, 5)
+Private Property Get pvAddressOfNotifyProc() As cAsyncSocket
+    Set pvAddressOfNotifyProc = InitAddressOfMethod(Me, 4)
 End Property
 
-Public Function SubclassProc(ByVal hWnd As Long, ByVal wMsg As Long, ByVal wParam As Long, ByVal lParam As Long, Handled As Boolean) As Long
-Attribute SubclassProc.VB_MemberFlags = "40"
-    #If hWnd Then '--- touch args
-    #End If
-    SubclassProc = pvHandleNotify(wMsg, wParam, lParam, Handled)
+Public Function NotifyProc(ByVal lTablePtr As Long, ByVal lTableSize As Long, ByVal lStartIdx As Long, ByVal lEndIdx As Long) As Long
+Attribute NotifyProc.VB_MemberFlags = "40"
+    Dim uMsg        As APIMSG
+    
+    Do While lStartIdx <> lEndIdx
+        Call CopyMemory(uMsg.lMessage, ByVal UnsignedAdd(lTablePtr, 12 * lStartIdx), 12)
+        pvHandleNotify uMsg.lMessage, uMsg.wParam, uMsg.lParam
+        lStartIdx = (lStartIdx + 1) And (lTableSize - 1)
+    Loop
 End Function
 
 '= shared ================================================================
@@ -1667,48 +1708,46 @@ End Function
 '=========================================================================
 
 Private Function InitAddressOfMethod(pObj As Object, ByVal MethodParamCount As Long) As Object
-    Const STR_THUNK     As String = "6AAAAABag+oFV4v6ge9QEMEAgcekEcEAuP9EJAS5+QcAAPOri8LB4AgFuQAAAKuLwsHoGAUAjYEAq7gIAAArq7hEJASLq7hJCIsEq7iBi1Qkq4tEJAzB4AIFCIkCM6uLRCQMweASBcDCCACriTrHQgQBAAAAi0QkCIsAiUIIi0QkEIlCDIHqUBDBAIvCBTwRwQCri8IFUBHBAKuLwgVgEcEAq4vCBYQRwQCri8IFjBHBAKuLwgWUEcEAq4vCBZwRwQCri8IFpBHBALn5BwAAq4PABOL6i8dfgcJQEMEAi0wkEIkRK8LCEAAPHwCLVCQE/0IEi0QkDIkQM8DCDABmkItUJAT/QgSLQgTCBAAPHwCLVCQE/0oEi0IEg/gAfgPCBABZWotCDGgAgAAAagBSUf/gZpC4AUAAgMIIALgBQACAwhAAuAFAAIDCGAC4AUAAgMIkAA==" ' 25.3.2019 14:01:08
+    Dim STR_THUNK       As String: STR_THUNK = "6AAAAABag+oFV4v6ge9QEMEAgcekEcEAuP9EJAS5+QcAAPOri8LB4AgFuQAAAKuLwsHoGAUAjYEAq7gIAAArq7hEJASLq7hJCIsEq7iBi1Qkq4tEJAzB4AIFCIkCM6uLRCQMweASBcDCCACriTrHQgQBAAAAi0QkCIsAiUIIi0QkEIlCDIHqUBDBAIvCBTwRwQCri8IFUBHBAKuLwgVgEcEAq4vCBYQRwQCri8IFjBHBAKuLwgWUEcEAq4vCBZwRwQCri8IFpBHBALn5BwAAq4PABOL6i8dfgcJQEMEAi0wkEIkRK8LCEAAPHwCLVCQE/0IEi0QkDIkQM8DCDABmkItUJAT/QgSLQgTCBAAPHwCLVCQE/0oEi0IEg/gAfgPCBABZWotCDGgAgAAAagBSUf/gZpC4AUAAgMIIALgBQACAwhAAuAFAAIDCGAC4AUAAgMIkAA==" ' 25.3.2019 14:01:08
     Const THUNK_SIZE    As Long = 16728
     Dim hThunk          As Long
     Dim lSize           As Long
     
-    hThunk = VirtualAlloc(0, THUNK_SIZE, MEM_COMMIT, PAGE_EXECUTE_READWRITE)
-    Call CryptStringToBinary(STR_THUNK, Len(STR_THUNK), CRYPT_STRING_BASE64, hThunk, THUNK_SIZE)
+    hThunk = pvThunkAllocate(STR_THUNK, THUNK_SIZE)
     lSize = CallWindowProc(hThunk, ObjPtr(pObj), MethodParamCount, GetProcAddress(GetModuleHandle("kernel32"), "VirtualFree"), VarPtr(InitAddressOfMethod))
     Debug.Assert lSize = THUNK_SIZE
 End Function
 
-Private Function InitSubclassingThunk(ByVal hWnd As Long, pObj As Object, ByVal pfnCallback As Long) As IUnknown
-    Const STR_THUNK     As String = "6AAAAABag+oFgepwEB4BV1aLdCQUg8YIgz4AdC+L+oHHABIeAYvCBQgRHgGri8IFRBEeAauLwgVUER4Bq4vCBXwRHgGruQkAAADzpYHCABIeAVJqGP9SEFqL+IvCq7gBAAAAqzPAq4tEJAyri3QkFKWlg+8YagBX/3IM/3cM/1IYi0QkGIk4Xl+4NBIeAS1wEB4BwhAAZpCLRCQIgzgAdSqDeAQAdSSBeAjAAAAAdRuBeAwAAABGdRKLVCQE/0IEi0QkDIkQM8DCDAC4AkAAgMIMAJCLVCQE/0IEi0IEwgQADx8Ai1QkBP9KBItCBHUYiwpS/3EM/3IM/1Eci1QkBIsKUv9RFDPAwgQAkFWL7ItVGIsKi0EshcB0OFL/0FqJQgiD+AF3VIP4AHUJgX0MAwIAAHRGiwpS/1EwWoXAdTuLClJq8P9xJP9RKFqpAAAACHUoUjPAUFCNRCQEUI1EJARQ/3UU/3UQ/3UM/3UI/3IQ/1IUWVhahcl1EYsK/3UU/3UQ/3UM/3UI/1EgXcIYAA==" ' 1.4.2019 11:41:46
-    Const THUNK_SIZE    As Long = 452
+Private Function InitAsyncSelectNotifyThunk(ByVal hWnd As Long, pObj As Object, ByVal pfnCallback As Long) As IUnknown
+    Dim STR_THUNK       As String: STR_THUNK = "6AAAAABagep1EMwAV1aLdCQUg8YIgz4AdDeL+oHHzBLMAIvCBRQRzACri8IFUBHMAKuLwgVgEcwAq4vCBYwRzACri8IFVBLMAKu5CQAAAPOlgcLMEswAi/qDxziLwqu4AQAAAKszwKuLRCQMqzPAq4t0JBSlpTPAq6uD7yRqAFf/cgz/dwz/UhSLRCQYiTheX7goE8wALXAQzAAFADAAAMIQAJCLRCQIgzgAdSqDeAQAdSSBeAjAAAAAdRuBeAwAAABGdRKLVCQE/0IEi0QkDIkQM8DCDAC4AkAAgMIMAJCLVCQE/0IEi0IEwgQADx8Ai1QkBP9KBItCBHUaUosKUv9xDP9yDP9RGFqLCv9yEGoA/1EkM8DCBAAPHwBVi+yLVRj/QgRSiwr/dRT/dRD/dQz/dQj/URxaUFZXjXoki0IgjTzHjTyHjXUMpaWlX17/QiCBYiD/AwAAi0IQhcB1d4sKi0EwhcB0KlL/0FqJQgiD+AF3T4sKUv9RNFqFwHVEiwpSavD/cSj/USxaqQAAAAh1Mf9yIFIzwFBU/3Ig/3IcaAAEAACNQiRQ/3IU/1IYWFpYiUIcO0IgdByLQgyFwHQV689Siwr/cRBqAGoAagD/USBaiUIQUugT////WF3CGABmkOgAAAAAWoHqWRLMAIHCBBPMAP9CBIsKi0EwhcB0DFL/0FqJQgiD+AF3RFKLCv9yEGoA/1EkWv9yIFIzwFBU/3Ig/3IcaAAEAACNQiRQ/3IU/1IYWFpYiUIcO0IgdAmLQgyFwHQC68/HQhAAAAAAUuiY/v//whAAkI1EQAGNREAB" ' 13.5.2020 16:40:47
+    Const THUNK_SIZE    As Long = 12984
     Static hThunk       As Long
     Dim aParams(0 To 10) As Long
     Dim lSize           As Long
-    
+
     aParams(0) = ObjPtr(pObj)
     aParams(1) = pfnCallback
     If hThunk = 0 Then
-        hThunk = pvThunkGlobalData("InitSubclassingThunk")
+        hThunk = pvThunkGlobalData("InitAsyncSelectNotifyThunk" & App.ThreadID)
     End If
     If hThunk = 0 Then
-        hThunk = VirtualAlloc(0, THUNK_SIZE, MEM_COMMIT, PAGE_EXECUTE_READWRITE)
-        Call CryptStringToBinary(STR_THUNK, Len(STR_THUNK), CRYPT_STRING_BASE64, hThunk, THUNK_SIZE)
-        aParams(2) = GetProcAddress(GetModuleHandle("ole32"), "CoTaskMemAlloc")
-        aParams(3) = GetProcAddress(GetModuleHandle("ole32"), "CoTaskMemFree")
+        hThunk = pvThunkAllocate(STR_THUNK, THUNK_SIZE)
         Call DefSubclassProc(0, 0, 0, 0)                                            '--- load comctl32
-        aParams(4) = GetProcAddressByOrdinal(GetModuleHandle("comctl32"), 410)      '--- 410 = SetWindowSubclass ordinal
-        aParams(5) = GetProcAddressByOrdinal(GetModuleHandle("comctl32"), 412)      '--- 412 = RemoveWindowSubclass ordinal
-        aParams(6) = GetProcAddressByOrdinal(GetModuleHandle("comctl32"), 413)      '--- 413 = DefSubclassProc ordinal
+        aParams(2) = GetProcAddressByOrdinal(GetModuleHandle("comctl32"), 410)      '--- 410 = SetWindowSubclass ordinal
+        aParams(3) = GetProcAddressByOrdinal(GetModuleHandle("comctl32"), 412)      '--- 412 = RemoveWindowSubclass ordinal
+        aParams(4) = GetProcAddressByOrdinal(GetModuleHandle("comctl32"), 413)      '--- 413 = DefSubclassProc ordinal
+        aParams(5) = GetProcAddress(GetModuleHandle("user32"), "SetTimer")
+        aParams(6) = GetProcAddress(GetModuleHandle("user32"), "KillTimer")
         '--- for IDE protection
-        Debug.Assert pvGetIdeOwner(aParams(7))
+        Debug.Assert pvThunkIdeOwner(aParams(7))
         If aParams(7) <> 0 Then
             aParams(8) = GetProcAddress(GetModuleHandle("user32"), "GetWindowLongA")
             aParams(9) = GetProcAddress(GetModuleHandle("vba6"), "EbMode")
             aParams(10) = GetProcAddress(GetModuleHandle("vba6"), "EbIsResetting")
         End If
-        pvThunkGlobalData("InitSubclassingThunk") = hThunk
+        pvThunkGlobalData("InitAsyncSelectNotifyThunk" & App.ThreadID) = hThunk
     End If
-    lSize = CallWindowProc(hThunk, hWnd, 0, VarPtr(aParams(0)), VarPtr(InitSubclassingThunk))
+    lSize = CallWindowProc(hThunk, hWnd, 0, VarPtr(aParams(0)), VarPtr(InitAsyncSelectNotifyThunk))
     Debug.Assert lSize = THUNK_SIZE
 End Function
 
@@ -1724,8 +1763,7 @@ Private Function InitCleanupThunk(ByVal hHandle As Long, sModuleName As String, 
         hThunk = pvThunkGlobalData("InitCleanupThunk")
     End If
     If hThunk = 0 Then
-        hThunk = VirtualAlloc(0, THUNK_SIZE, MEM_COMMIT, PAGE_EXECUTE_READWRITE)
-        Call CryptStringToBinary(STR_THUNK, Len(STR_THUNK), CRYPT_STRING_BASE64, hThunk, THUNK_SIZE)
+        hThunk = pvThunkAllocate(STR_THUNK, THUNK_SIZE)
         aParams(0) = GetProcAddress(GetModuleHandle("ole32"), "CoTaskMemAlloc")
         aParams(1) = GetProcAddress(GetModuleHandle("ole32"), "CoTaskMemFree")
         pvThunkGlobalData("InitCleanupThunk") = hThunk
@@ -1755,7 +1793,7 @@ Private Property Let ThunkPrivateData(pThunk As IUnknown, Optional ByVal Index A
     End If
 End Property
 
-Private Function pvGetIdeOwner(hIdeOwner As Long) As Boolean
+Private Function pvThunkIdeOwner(hIdeOwner As Long) As Boolean
     #If Not ImplNoIdeProtection Then
         Dim lProcessId      As Long
         
@@ -1764,7 +1802,39 @@ Private Function pvGetIdeOwner(hIdeOwner As Long) As Boolean
             Call GetWindowThreadProcessId(hIdeOwner, lProcessId)
         Loop While hIdeOwner <> 0 And lProcessId <> GetCurrentProcessId()
     #End If
-    pvGetIdeOwner = True
+    pvThunkIdeOwner = True
+End Function
+
+Private Function pvThunkAllocate(sText As String, Optional ByVal Size As Long) As Long
+    Static Map(0 To &H3FF) As Long
+    Dim baInput()       As Byte
+    Dim lIdx            As Long
+    Dim lChar           As Long
+    Dim lPtr            As Long
+    
+    pvThunkAllocate = VirtualAlloc(0, IIf(Size > 0, Size, (Len(sText) \ 4) * 3), MEM_COMMIT, PAGE_EXECUTE_READWRITE)
+    If pvThunkAllocate = 0 Then
+        Exit Function
+    End If
+    '--- init decoding maps
+    If Map(65) = 0 Then
+        baInput = StrConv("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/", vbFromUnicode)
+        For lIdx = 0 To UBound(baInput)
+            lChar = baInput(lIdx)
+            Map(&H0 + lChar) = lIdx * (2 ^ 2)
+            Map(&H100 + lChar) = (lIdx And &H30) \ (2 ^ 4) Or (lIdx And &HF) * (2 ^ 12)
+            Map(&H200 + lChar) = (lIdx And &H3) * (2 ^ 22) Or (lIdx And &H3C) * (2 ^ 6)
+            Map(&H300 + lChar) = lIdx * (2 ^ 16)
+        Next
+    End If
+    '--- base64 decode loop
+    baInput = StrConv(Replace(Replace(sText, vbCr, vbNullString), vbLf, vbNullString), vbFromUnicode)
+    lPtr = pvThunkAllocate
+    For lIdx = 0 To UBound(baInput) - 3 Step 4
+        lChar = Map(baInput(lIdx + 0)) Or Map(&H100 + baInput(lIdx + 1)) Or Map(&H200 + baInput(lIdx + 2)) Or Map(&H300 + baInput(lIdx + 3))
+        Call CopyMemory(ByVal lPtr, lChar, 3)
+        lPtr = (lPtr Xor SIGN_BIT) + 3 Xor SIGN_BIT
+    Next
 End Function
 
 Private Property Get pvThunkGlobalData(sKey As String) As Long
@@ -1785,17 +1855,27 @@ End Property
 '=========================================================================
 
 Private Sub Class_Initialize()
+    Const ERR_INVALID_WINDOW_HANDLE As Long = 1400
     Dim sHelperName     As String
+    Dim hWndParent      As Long
     Dim hWndHelper      As Long
     Dim lPtr            As Long
     Dim baWSAData()     As Byte
     
     sHelperName = GetCurrentProcessId() & ":" & App.ThreadID & ":" & STR_HELPER_NAME
-    hWndHelper = FindWindowEx(HWND_MESSAGE, 0, STR_HELPER_CLASS, sHelperName)
+    hWndParent = HWND_MESSAGE
+    Do
+        hWndHelper = FindWindowEx(hWndParent, 0, STR_HELPER_CLASS, sHelperName)
+        If hWndHelper = 0 And Err.LastDllError = ERR_INVALID_WINDOW_HANDLE Then
+            hWndParent = 0
+        Else
+            Exit Do
+        End If
+    Loop
     lPtr = GetWindowLong(hWndHelper, GWL_USERDATA)
     If hWndHelper = 0 Or lPtr <> 0 Then
         If hWndHelper = 0 Then
-            hWndHelper = CreateWindowEx(0, STR_HELPER_CLASS, sHelperName, 0, 0, 0, 0, 0, HWND_MESSAGE, 0, App.hInstance, ByVal 0)
+            hWndHelper = CreateWindowEx(0, STR_HELPER_CLASS, sHelperName, 0, 0, 0, 0, 0, hWndParent, 0, App.hInstance, ByVal 0)
         End If
         If lPtr <> 0 Then
             Set m_oHelperWindow = pvToSocket(lPtr)
@@ -1812,7 +1892,7 @@ Private Sub Class_Initialize()
             If WSAStartup(&H101, baWSAData(0)) = 0 Then
                 .hWnd = hWndHelper
                 Call SetWindowLong(hWndHelper, GWL_USERDATA, ObjPtr(Me))
-                Set .Subclass = InitSubclassingThunk(hWndHelper, Me, pvAddressOfSubclassProc.SubclassProc(0, 0, 0, 0, 0))
+                Set .Notify = InitAsyncSelectNotifyThunk(hWndHelper, Me, pvAddressOfNotifyProc.NotifyProc(0, 0, 0, 0))
                 Set .Cleanup = InitCleanupThunk(hWndHelper, "user32", "DestroyWindow")
             End If
             ReDim .SocketPtr(0 To 511) As Long
@@ -1825,9 +1905,17 @@ Private Sub Class_Terminate()
         pvClose
         Set m_oHelperWindow = Nothing
     Else
-        '-- terminate helper window
-        Call SetWindowLong(frMessageHWnd, GWL_USERDATA, 0)
-        Call WSACleanup
+        With m_uWindowState(0)
+            '--- terminate notifications
+            Debug.Assert ThunkPrivateData(.Notify, 1) = .hWnd
+            ThunkPrivateData(.Notify, 1) = 0
+            Set .Notify = Nothing
+            '--- terminate helper window
+            Call SetWindowLong(.hWnd, GWL_USERDATA, 0)
+            Set .Cleanup = Nothing
+            '--- terminate winsock
+            Call WSACleanup
+        End With
         Erase m_uWindowState
     End If
 End Sub

@@ -63,7 +63,7 @@ Private Const ERR_HTTP_ONLY         As String = "Http protocol supported only"
 Private Const ERR_INVALID_REDIRECT  As String = "Invalid redirect to %1"
 Private Const ERR_INVALID_RESPONSE  As String = "Server returned %1"
 
-Private WithEvents m_oSocket    As cAsyncSocket
+Private WithEvents m_oSocket    As cTlsSocket
 Attribute m_oSocket.VB_VarHelpID = -1
 Private m_uRemote               As UcsParsedUrl
 Private m_sLocalFileName        As String
@@ -91,6 +91,8 @@ Private Type UcsParsedUrl
     Host            As String
     Port            As Long
     Path            As String
+    QueryString     As String
+    Anchor          As String
     User            As String
     Pass            As String
 End Type
@@ -108,7 +110,7 @@ End Sub
 '=========================================================================
 
 Property Get URL() As String
-    URL = m_uRemote.Protocol & "://" & m_uRemote.Host & m_uRemote.Path
+    URL = m_uRemote.Protocol & "://" & m_uRemote.Host & m_uRemote.Path & m_uRemote.QueryString
 End Property
 
 Property Get LocalFileName() As String
@@ -127,7 +129,7 @@ Property Set CallbackWeakRef(oValue As Object)
     m_lCallbackPtr = ObjPtr(oValue)
 End Property
 
-Property Get Socket() As cAsyncSocket
+Property Get Socket() As cTlsSocket
     Set Socket = m_oSocket
 End Property
 
@@ -157,6 +159,7 @@ Public Sub CancelOperation()
     Const FUNC_NAME     As String = "CancelOperation"
     
     On Error GoTo EH
+    m_oSocket.Close_
     Set m_oSocket = Nothing
     Set m_pFileStream = Nothing
     m_lCallbackPtr = 0
@@ -173,14 +176,16 @@ Private Sub pvInit(URL As String, LocalFileName As Variant, ByVal StreamFlags As
     Dim hResult     As Long
     
     On Error GoTo EH
-    If Not pvParseUrl(URL, m_uRemote) Then
+    If Not pvParseUrl(URL, m_uRemote, "http") Then
         On Error GoTo 0
         Err.Raise vbObjectError, , ERR_INVALID_URL
     End If
-    If LCase$(m_uRemote.Protocol) <> "http" Then
+    Select Case LCase$(m_uRemote.Protocol)
+    Case "http", "https"
+    Case Else
         On Error GoTo 0
         Err.Raise vbObjectError, , ERR_HTTP_ONLY
-    End If
+    End Select
     If IsObject(LocalFileName) Then
         m_sLocalFileName = "[stream]"
         Set m_pFileStream = LocalFileName
@@ -206,12 +211,12 @@ Private Sub pvInit(URL As String, LocalFileName As Variant, ByVal StreamFlags As
         m_dblContentLength = 0
     End If
     m_baFileBuffer = vbNullString
-    Set m_oSocket = New cAsyncSocket
+    Set m_oSocket = New cTlsSocket
     If Not m_oSocket.Create(SocketType:=ucsSckStream) Then
         On Error GoTo 0
         Err.Raise vbObjectError, , m_oSocket.GetErrorDescription(m_oSocket.LastError)
     End If
-    If Not m_oSocket.Connect(m_uRemote.Host, m_uRemote.Port) Then
+    If Not m_oSocket.Connect(m_uRemote.Host, m_uRemote.Port, UseTls:=pvIsProtocolSecure(m_uRemote.Protocol)) Then
         On Error GoTo 0
         Err.Raise vbObjectError, , m_oSocket.GetErrorDescription(m_oSocket.LastError)
     End If
@@ -235,35 +240,8 @@ Private Function pvRecvHeaders(baBuffer() As Byte) As Boolean
     lPos = InStr(sHeaders, STR_DELIM)
     If lPos > 0 Then
         vSplit = Split(Left$(sHeaders, lPos), vbCrLf)
-        Select Case Mid$(vSplit(0), 10, 3)
-        Case "301", "302"
-            For Each vElem In vSplit
-                If Left$(LCase$(vElem), Len(HDR_LOCATION)) = HDR_LOCATION Then
-                    vElem = Trim$(Mid$(vElem, Len(HDR_LOCATION) + 1))
-                    If Not pvParseUrl(CStr(vElem), uRedirect) Then
-                        pvSetError vbObjectError, Replace(ERR_INVALID_REDIRECT, "%1", vElem)
-                        GoTo QH
-                    End If
-                    uRedirect.User = m_uRemote.User
-                    uRedirect.Pass = m_uRemote.Pass
-                    Exit For
-                End If
-            Next
-            If LCase$(uRedirect.Protocol) <> "http" Then
-                pvSetError vbObjectError, ERR_HTTP_ONLY
-                GoTo QH
-            End If
-            m_uRemote = uRedirect
-            m_oSocket.Close_
-            If Not m_oSocket.Create(SocketType:=ucsSckStream) Then
-                pvSetError m_oSocket.LastError
-                GoTo QH
-            End If
-            If Not m_oSocket.Connect(m_uRemote.Host, m_uRemote.Port) Then
-                pvSetError m_oSocket.LastError
-                GoTo QH
-            End If
-        Case "200"
+        Select Case CLng(Val(Mid$(vSplit(0), 10, 3)))
+        Case 200 To 299
             m_dblContentLength = -1
             For Each vElem In vSplit
                 If Left$(LCase$(vElem), Len(HDR_CONTENT_LENGTH)) = HDR_CONTENT_LENGTH Then
@@ -272,6 +250,35 @@ Private Function pvRecvHeaders(baBuffer() As Byte) As Boolean
             Next
             m_eState = ucsWaitRecvBody
             pvRecvBody m_oSocket.ToTextArray(Mid$(sHeaders, lPos + Len(STR_DELIM)), ucsScpAcp)
+        Case 300 To 399
+            For Each vElem In vSplit
+                If Left$(LCase$(vElem), Len(HDR_LOCATION)) = HDR_LOCATION Then
+                    vElem = Trim$(Mid$(vElem, Len(HDR_LOCATION) + 1))
+                    If Not pvParseUrl(CStr(vElem), uRedirect, m_uRemote.Protocol) Then
+                        pvSetError vbObjectError, Replace(ERR_INVALID_REDIRECT, "%1", vElem)
+                        GoTo QH
+                    End If
+                    uRedirect.User = m_uRemote.User
+                    uRedirect.Pass = m_uRemote.Pass
+                    Exit For
+                End If
+            Next
+            Select Case LCase$(uRedirect.Protocol)
+            Case "http", "https"
+            Case Else
+                pvSetError vbObjectError, ERR_HTTP_ONLY
+                GoTo QH
+            End Select
+            m_uRemote = uRedirect
+            m_oSocket.Close_
+            If Not m_oSocket.Create(SocketType:=ucsSckStream) Then
+                pvSetError m_oSocket.LastError
+                GoTo QH
+            End If
+            If Not m_oSocket.Connect(m_uRemote.Host, m_uRemote.Port, UseTls:=pvIsProtocolSecure(m_uRemote.Protocol)) Then
+                pvSetError m_oSocket.LastError
+                GoTo QH
+            End If
         Case Else
             pvSetError vbObjectError, Replace(ERR_INVALID_RESPONSE, "%1", Mid$(vSplit(0), 10))
             GoTo QH
@@ -351,7 +358,9 @@ Private Function pvSendBody() As Boolean
                 Call CallbackWeakRef.UploadProgress(Me, m_dblBytesProgress, m_dblContentLength)
             End If
             m_dblBytesProgress = m_dblBytesProgress + lSize
-            m_oSocket.PostEvent ucsSfdWrite
+            If Not m_oSocket.HasPendingEvent Then
+                m_oSocket.PostEvent ucsSfdWrite
+            End If
         End If
     Else
         Set m_pFileStream = Nothing
@@ -367,7 +376,9 @@ Private Function pvSendBody() As Boolean
             If m_lCallbackPtr <> 0 Then
                 Call CallbackWeakRef.UploadProgress(Me, m_dblBytesProgress, m_dblContentLength)
             End If
-            m_oSocket.PostEvent ucsSfdWrite
+            If Not m_oSocket.HasPendingEvent Then
+                m_oSocket.PostEvent ucsSfdWrite
+            End If
         End If
     End If
     '--- success
@@ -376,6 +387,37 @@ QH:
     Exit Function
 EH:
     PrintError FUNC_NAME
+End Function
+
+Private Function pvSendComplete(baBuffer() As Byte) As Boolean
+    Const FUNC_NAME     As String = "pvSendComplete"
+    Const STR_DELIM     As String = vbCrLf & vbCrLf
+    Dim sHeaders        As String
+    Dim lPos            As Long
+    Dim vSplit          As Variant
+    
+    On Error GoTo EH
+    sHeaders = m_oSocket.FromTextArray(baBuffer, ucsScpAcp)
+    lPos = InStr(sHeaders, STR_DELIM)
+    If lPos > 0 Then
+        vSplit = Split(Left$(sHeaders, lPos), vbCrLf)
+        Select Case CLng(Val(Mid$(vSplit(0), 10, 3)))
+        Case 200 To 299, 300 To 399
+            RaiseEvent UploadComplete(m_sLocalFileName)
+            If m_lCallbackPtr <> 0 Then
+                Call CallbackWeakRef.UploadComplete(Me, m_sLocalFileName)
+            End If
+        Case Else
+            pvSetError vbObjectError, Replace(ERR_INVALID_RESPONSE, "%1", Mid$(vSplit(0), 10))
+            GoTo QH
+        End Select
+        m_oSocket.Close_
+    End If
+QH:
+    Exit Function
+EH:
+    PrintError FUNC_NAME
+    Resume Next
 End Function
 
 Private Sub pvSetError(ByVal lNumber As Long, Optional sDescription As String)
@@ -399,14 +441,14 @@ EH:
     PrintError FUNC_NAME
 End Sub
 
-Private Function pvParseUrl(sUrl As String, uParsed As UcsParsedUrl) As Boolean
+Private Function pvParseUrl(sUrl As String, uParsed As UcsParsedUrl, Optional DefProtocol As String) As Boolean
     With CreateObject("VBScript.RegExp")
         .Global = True
-        .Pattern = "^(.*)://(?:(?:([^:]*):)?([^@]*)@)?([A-Za-z0-9\-\.]+)(:[0-9]+)?(.*)$"
+        .Pattern = "^(?:(?:(.+):)?//)?(?:(?:([^:]*):)?([^@]*)@)?([A-Za-z0-9\-\.]+)(:[0-9]+)?(/[^?#]*)?(\?[^#]*)?(#.*)?$"
         With .Execute(sUrl)
             If .Count > 0 Then
                 With .Item(0).SubMatches
-                    uParsed.Protocol = .Item(0)
+                    uParsed.Protocol = IIf(LenB(.Item(0)) = 0, DefProtocol, .Item(0))
                     uParsed.User = .Item(1)
                     If LenB(uParsed.User) = 0 Then
                         uParsed.User = .Item(2)
@@ -429,6 +471,8 @@ Private Function pvParseUrl(sUrl As String, uParsed As UcsParsedUrl) As Boolean
                     If LenB(uParsed.Path) = 0 Then
                         uParsed.Path = "/"
                     End If
+                    uParsed.QueryString = .Item(6)
+                    uParsed.Anchor = .Item(7)
                 End With
                 pvParseUrl = True
             End If
@@ -436,12 +480,20 @@ Private Function pvParseUrl(sUrl As String, uParsed As UcsParsedUrl) As Boolean
     End With
 End Function
 
+Private Function pvIsProtocolSecure(sProtocol As String) As Boolean
+    pvIsProtocolSecure = (LCase$(sProtocol) = "https")
+End Function
+
 Private Function IStream_Read(pstm As IUnknown, baBuffer() As Byte, Optional BytesRead As Long) As Long
-    IStream_Read = DispCallByVtbl(pstm, 3, VarPtr(baBuffer(0)), UBound(baBuffer) + 1, VarPtr(BytesRead))
+    If Not pstm Is Nothing And UBound(baBuffer) >= 0 Then
+        IStream_Read = DispCallByVtbl(pstm, 3, VarPtr(baBuffer(0)), UBound(baBuffer) + 1, VarPtr(BytesRead))
+    End If
 End Function
 
 Private Function IStream_Write(pstm As IUnknown, baBuffer() As Byte, Optional BytesWritten As Long) As Long
-    IStream_Write = DispCallByVtbl(pstm, 4, VarPtr(baBuffer(0)), UBound(baBuffer) + 1, VarPtr(BytesWritten))
+    If Not pstm Is Nothing And UBound(baBuffer) >= 0 Then
+        IStream_Write = DispCallByVtbl(pstm, 4, VarPtr(baBuffer(0)), UBound(baBuffer) + 1, VarPtr(BytesWritten))
+    End If
 End Function
 
 Private Function DispCallByVtbl(pUnk As IUnknown, ByVal lIndex As Long, ParamArray A() As Variant) As Variant
@@ -475,7 +527,7 @@ Private Sub m_oSocket_OnConnect()
     On Error GoTo EH
     If m_lStreamFlags <> STGM_READ Then
         m_eState = ucsWaitRecvHeaders
-        If Not m_oSocket.SendText("GET " & m_uRemote.Path & " HTTP/1.0" & vbCrLf & _
+        If Not m_oSocket.SendText("GET " & m_uRemote.Path & m_uRemote.QueryString & " HTTP/1.0" & vbCrLf & _
                 "Host: " & m_uRemote.Host & vbCrLf & _
                 "Accept: */*" & vbCrLf & vbCrLf, CodePage:=ucsScpAcp) Then
             pvSetError m_oSocket.LastError
@@ -486,7 +538,7 @@ Private Sub m_oSocket_OnConnect()
             "Content-Disposition: form-data; name=""uploadfile""; filename=""" & Mid$(m_sLocalFileName, InStrRev(m_sLocalFileName, "\") + 1) & """" & vbCrLf & _
             "Content-Type: application/octet-stream" & vbCrLf & vbCrLf
         m_sBoundaryData = vbCrLf & "--" & STR_BOUNDARY & "--"
-        If Not m_oSocket.SendText("POST " & m_uRemote.Path & " HTTP/1.0" & vbCrLf & _
+        If Not m_oSocket.SendText("POST " & m_uRemote.Path & m_uRemote.QueryString & " HTTP/1.0" & vbCrLf & _
                 "Host: " & m_uRemote.Host & vbCrLf & _
                 "Content-Length: " & Len(sPostData) + m_dblContentLength + Len(m_sBoundaryData) & vbCrLf & _
                 "Content-Type: multipart/form-data; boundary=" & STR_BOUNDARY & vbCrLf & _
@@ -519,13 +571,27 @@ Private Sub m_oSocket_OnReceive()
     End If
     If m_eState = ucsWaitRecvBody Then
         If Not m_oSocket.ReceiveArray(baBuffer) Then
-            pvSetError m_oSocket.LastError
+            If m_dblBytesProgress < m_dblContentLength Then
+                pvSetError m_oSocket.LastError
+            End If
             GoTo QH
         End If
         If UBound(baBuffer) < 0 Then
             GoTo QH
         End If
         If Not pvRecvBody(baBuffer) Then
+            GoTo QH
+        End If
+    End If
+    If m_eState >= ucsWaitSendBody Then
+        If Not m_oSocket.ReceiveArray(baBuffer) Then
+            pvSetError m_oSocket.LastError
+            GoTo QH
+        End If
+        If UBound(baBuffer) < 0 Then
+            GoTo QH
+        End If
+        If Not pvSendComplete(baBuffer) Then
             GoTo QH
         End If
     End If
@@ -540,7 +606,7 @@ Private Sub m_oSocket_OnSend()
     
     On Error GoTo EH
     If m_eState = ucsWaitBoundary Then
-        m_oSocket.Close_
+        m_oSocket.ShutDown
     End If
     If m_eState = ucsWaitSendBody Then
         If Not pvSendBody() Then
@@ -556,20 +622,19 @@ End Sub
 Private Sub m_oSocket_OnClose()
     Const FUNC_NAME     As String = "m_oSocket_OnClose"
     Dim baBuffer()      As Byte
+    Dim dblBytes        As Double
     
     On Error GoTo EH
     If m_eState = ucsWaitRecvBody Then
+        Do
+            dblBytes = m_dblBytesProgress
+            m_oSocket_OnReceive
+        Loop While m_dblBytesProgress > dblBytes
         baBuffer = vbNullString
         pvRecvBody baBuffer, Flush:=True
         RaiseEvent DownloadComplete(m_sLocalFileName)
         If m_lCallbackPtr <> 0 Then
             Call CallbackWeakRef.DownloadComplete(Me, m_sLocalFileName)
-        End If
-    End If
-    If m_eState = ucsWaitBoundary Then
-        RaiseEvent UploadComplete(m_sLocalFileName)
-        If m_lCallbackPtr <> 0 Then
-            Call CallbackWeakRef.UploadComplete(Me, m_sLocalFileName)
         End If
     End If
     CancelOperation
@@ -582,7 +647,9 @@ Private Sub m_oSocket_OnError(ByVal ErrorCode As Long, ByVal EventMask As UcsAsy
     Const FUNC_NAME     As String = "m_oSocket_OnError"
     
     On Error GoTo EH
-    pvSetError ErrorCode
+    If m_oSocket.LastError <> 0 Then
+        pvSetError ErrorCode
+    End If
     Exit Sub
 EH:
     PrintError FUNC_NAME
@@ -594,4 +661,8 @@ End Sub
 
 Private Sub Class_Initialize()
     m_lBufferSize = DEF_BUFFER_SIZE
+End Sub
+
+Private Sub Class_Terminate()
+    Set m_oSocket = Nothing
 End Sub
