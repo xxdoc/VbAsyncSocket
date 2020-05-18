@@ -13,7 +13,7 @@ HelpFile=""
 Title="Project1"
 ExeName32="Project1.exe"
 Command32=""
-Name="Project1"
+Name="Basic"
 HelpContextID="0"
 CompatibleMode="0"
 MajorVer=1
@@ -22,7 +22,7 @@ RevisionVer=0
 AutoIncrementVer=0
 ServerSupportFiles=0
 VersionCompanyName="Unicontsoft"
-CondComp="ASYNCSOCKET_USE_LIBSODIUM = 0 : Dummy = 1"
+CondComp="ASYNCSOCKET_USE_LIBSODIUM = 0 : USE_DEBUG_LOG = 1 : Dummy = 1"
 CompilationType=0
 OptimizationType=2
 FavorPentiumPro(tm)=0

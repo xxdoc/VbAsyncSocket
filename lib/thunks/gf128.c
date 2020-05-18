@@ -40,26 +40,6 @@ void cf_gf128_frombytes_be(const uint8_t in[16], cf_gf128 out)
 
 /* out = 2 * in.  Arguments may alias. */
 static
-void cf_gf128_double(const cf_gf128 in, cf_gf128 out)
-{
-  uint8_t table[2] = { 0x00, 0x87 };
-  uint32_t borrow = 0;
-  uint32_t inword;
-
-  inword = in[3];   out[3] = (inword << 1) | borrow;  borrow = inword >> 31;
-  inword = in[2];   out[2] = (inword << 1) | borrow;  borrow = inword >> 31;
-  inword = in[1];   out[1] = (inword << 1) | borrow;  borrow = inword >> 31;
-  inword = in[0];   out[0] = (inword << 1) | borrow;  borrow = inword >> 31;
-  
-#if CF_CACHE_SIDE_CHANNEL_PROTECTION
-  out[3] ^= select_u8(borrow, table, 2);
-#else
-  out[3] ^= table[borrow];
-#endif
-}
-
-/* out = 2 * in.  Arguments may alias. */
-static
 void cf_gf128_double_le(const cf_gf128 in, cf_gf128 out)
 {
   uint8_t table[2] = { 0x00, 0xe1 };
@@ -118,4 +98,68 @@ void cf_gf128_mul(const cf_gf128 x, const cf_gf128 y, cf_gf128 out)
   }
 
   memcpy(out, Z, sizeof Z);
+}
+
+#include <immintrin.h>
+
+/*
+ * Select appropriate inline keyword for the compiler
+ */
+#if defined __GNUC__ || defined __clang__
+#    define INLINE __inline__
+#elif defined (_MSC_VER)
+#    define INLINE __forceinline
+#else
+#    define INLINE
+#endif
+
+/*
+ *  From https://www.intel.com/content/www/us/en/processors/carry-less-multiplication-instruction-in-gcm-mode-paper.html
+ */
+static INLINE __m128i gfmul(__m128i a, __m128i b)
+{
+    __m128i tmp2, tmp3, tmp4, tmp5, tmp6, tmp7, tmp8, tmp9;
+    tmp3 = _mm_clmulepi64_si128(a, b, 0x00);
+    tmp4 = _mm_clmulepi64_si128(a, b, 0x10);
+    tmp5 = _mm_clmulepi64_si128(a, b, 0x01);
+    tmp6 = _mm_clmulepi64_si128(a, b, 0x11);
+    tmp4 = _mm_xor_si128(tmp4, tmp5);
+    tmp5 = _mm_slli_si128(tmp4, 8);
+    tmp4 = _mm_srli_si128(tmp4, 8);
+    tmp3 = _mm_xor_si128(tmp3, tmp5);
+    tmp6 = _mm_xor_si128(tmp6, tmp4);
+    tmp7 = _mm_srli_epi32(tmp3, 31);
+    tmp8 = _mm_srli_epi32(tmp6, 31);
+    tmp3 = _mm_slli_epi32(tmp3, 1);
+    tmp6 = _mm_slli_epi32(tmp6, 1);
+    tmp9 = _mm_srli_si128(tmp7, 12);
+    tmp8 = _mm_slli_si128(tmp8, 4);
+    tmp7 = _mm_slli_si128(tmp7, 4);
+    tmp3 = _mm_or_si128(tmp3, tmp7);
+    tmp6 = _mm_or_si128(tmp6, tmp8);
+    tmp6 = _mm_or_si128(tmp6, tmp9);
+    tmp7 = _mm_slli_epi32(tmp3, 31);
+    tmp8 = _mm_slli_epi32(tmp3, 30);
+    tmp9 = _mm_slli_epi32(tmp3, 25);
+    tmp7 = _mm_xor_si128(tmp7, tmp8);
+    tmp7 = _mm_xor_si128(tmp7, tmp9);
+    tmp8 = _mm_srli_si128(tmp7, 4);
+    tmp7 = _mm_slli_si128(tmp7, 12);
+    tmp3 = _mm_xor_si128(tmp3, tmp7);
+    tmp2 = _mm_srli_epi32(tmp3, 1);
+    tmp4 = _mm_srli_epi32(tmp3, 2);
+    tmp5 = _mm_srli_epi32(tmp3, 7);
+    tmp2 = _mm_xor_si128(tmp2, tmp4);
+    tmp2 = _mm_xor_si128(tmp2, tmp5);
+    tmp2 = _mm_xor_si128(tmp2, tmp8);
+    tmp3 = _mm_xor_si128(tmp3, tmp2); 
+    tmp6 = _mm_xor_si128(tmp6, tmp3);
+    return tmp6;
+}
+
+static void cf_gf128_mul_fast(const cf_gf128 x, const cf_gf128 y, cf_gf128 out)
+{
+    const __m128i a = _mm_shuffle_epi32(_mm_loadu_si128((const __m128i*)x), _MM_SHUFFLE(0, 1, 2, 3));
+    const __m128i b = _mm_shuffle_epi32(_mm_loadu_si128((const __m128i*)y), _MM_SHUFFLE(0, 1, 2, 3));
+    _mm_storeu_si128((__m128i*)out, _mm_shuffle_epi32(gfmul(a, b), _MM_SHUFFLE(0, 1, 2, 3)));
 }
