@@ -144,7 +144,7 @@ Private Sub Form_Load()
     If txtResult.Font.Name = "Arial" Then
         txtResult.Font.Name = "Courier New"
     End If
-    For Each vElem In Split("cert-test.sandbox.google.com|tls13.1d.pw|localhost:44330|tls.ctf.network|www.mikestoolbox.org|swifttls.org|tls13.pinterjann.is|rsa8192.badssl.com|rsa4096.badssl.com|rsa2048.badssl.com|ecc384.badssl.com|ecc256.badssl.com|dir.bg|host.bg|bgdev.org|cnn.com|gmail.com|google.com|saas.bg|saas.bg:465|www.cloudflare.com|devblogs.microsoft.com|www.brentozar.com|ayende.com/blog|www.nerds2nerds.com|robert.ocallahan.org|distrowatch.com|server.cryptomix.com/secure/|www.integralblue.com/testhandshake/", "|")
+    For Each vElem In Split("www.howsmyssl.com/a/check|cert-test.sandbox.google.com|tls13.1d.pw|localhost:44330|tls.ctf.network|www.mikestoolbox.org|swifttls.org|tls13.pinterjann.is|rsa8192.badssl.com|rsa4096.badssl.com|rsa2048.badssl.com|ecc384.badssl.com|ecc256.badssl.com|dir.bg|host.bg|bgdev.org|cnn.com|gmail.com|google.com|saas.bg|saas.bg:465|www.cloudflare.com|devblogs.microsoft.com|www.brentozar.com|ayende.com/blog|www.nerds2nerds.com|robert.ocallahan.org|distrowatch.com|server.cryptomix.com/secure/|www.integralblue.com/testhandshake/", "|")
         cobUrl.AddItem vElem
     Next
     sAddr = GetSetting(App.Title, "Form1", "Url", cobUrl.Text)
@@ -206,8 +206,8 @@ Private Sub Command1_Click()
     txtResult.Text = vbNullString
     sResult = HttpsRequest(uRemote, sError)
     If LenB(sError) <> 0 Then
-        pvAppendLogText txtResult, "Error: " & sError
-        GoTo QH
+        pvAppendLogText txtResult, "Error: " & sError & vbCrLf
+        bKeepDebug = True
     End If
     If LenB(sResult) <> 0 Then
         If Not bKeepDebug Then
@@ -255,7 +255,7 @@ Private Function HttpsRequest(uRemote As UcsParsedUrl, sError As String) As Stri
         Set m_oSocket = New cTlsSocket
         If Not m_oSocket.SyncConnect(uRemote.Host, uRemote.Port, _
                 LocalFeatures:=IIf(pvIsKnownBadCertificate(uRemote.Host), ucsTlsIgnoreServerCertificateErrors, 0), _
-                RootCa:=m_oRootCa) Then
+                RootCa:=m_oRootCa, AlpnProtocols:="http/1.1") Then
             sError = m_oSocket.LastError.Description
             GoTo QH
         End If
@@ -406,7 +406,7 @@ Private Sub m_oServerSocket_OnAccept()
     Dim sKey            As String
     
     On Error GoTo EH
-    If Not m_oServerSocket.Accept(oSocket) Then
+    If Not m_oServerSocket.Accept(oSocket, AlpnProtocols:="http/1.1") Then
         GoTo QH
     End If
     Set oHandler = New cRequestHandler
@@ -433,6 +433,7 @@ End Function
 Private Sub m_oSocket_OnClientCertificate(CaDn As Object, Confirmed As Boolean)
     Dim baDName()       As Byte
     
+    DebugLog MODULE_NAME, "m_oSocket_OnClientCertificate", "Raised"
     If m_oSocket.LocalCertificates Is Nothing Then
         If SearchCollection(CaDn, 1, RetVal:=baDName) Then
             #If ImplUseDebugLog Then
@@ -474,9 +475,15 @@ Private Sub m_oSocket_OnClose()
 End Sub
 
 Private Sub m_oSocket_OnError(ByVal ErrorCode As Long, ByVal EventMask As UcsAsyncSocketEventMaskEnum)
-    If m_oSocket.LastError <> 0 Then
-        #If ImplUseDebugLog Then
-            DebugLog MODULE_NAME, "m_oSocket_OnError", "LastError=&H" & Hex$(m_oSocket.LastError.Number) & " " & m_oSocket.LastError.Description, vbLogEventTypeError
-        #End If
-    End If
+    Const FUNC_NAME     As String = "m_oSocket_OnError"
+    
+    With m_oSocket.LastError
+        If .Number <> 0 Then
+            #If ImplUseDebugLog Then
+                DebugLog MODULE_NAME, FUNC_NAME & ", " & Replace(.Source, vbCrLf, ", "), .Description & " &H" & Hex$(.Number), vbLogEventTypeError
+            #Else
+                Debug.Print "Error: " & .Description & " &H" & Hex$(.Number) & " [" & MODULE_NAME & "." & FUNC_NAME & ", " & Replace(.Source, vbCrLf, ", ") & "]"
+            #End If
+        End If
+    End With
 End Sub
