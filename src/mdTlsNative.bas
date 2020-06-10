@@ -27,6 +27,10 @@ Private Const UNISP_NAME                                As String = "Microsoft U
 Private Const SECPKG_CRED_INBOUND                       As Long = 1
 Private Const SECPKG_CRED_OUTBOUND                      As Long = 2
 Private Const SCHANNEL_CRED_VERSION                     As Long = 4
+Private Const SP_PROT_TLS1_0                            As Long = &H40 Or &H80
+Private Const SP_PROT_TLS1_1                            As Long = &H100 Or &H200
+Private Const SP_PROT_TLS1_2                            As Long = &H400 Or &H800
+Private Const SP_PROT_TLS1_3                            As Long = &H1000 Or &H2000
 Private Const SCH_CRED_MANUAL_CRED_VALIDATION           As Long = 8
 Private Const SCH_CRED_NO_DEFAULT_CREDS                 As Long = &H10
 '-- for InitializeSecurityContext
@@ -298,10 +302,12 @@ Private Const TLS_CONTENT_TYPE_ALERT        As Long = 21
 Private Const LNG_FACILITY_WIN32            As Long = &H80070000
 
 Private Enum UcsTlsLocalFeaturesEnum '--- bitmask
-    ucsTlsSupportTls12 = 2 ^ 0
-    ucsTlsSupportTls13 = 2 ^ 1
-    ucsTlsIgnoreServerCertificateErrors = 2 ^ 2
-    ucsTlsSupportAll = ucsTlsSupportTls12 Or ucsTlsSupportTls13
+    ucsTlsSupportTls10 = 2 ^ 0
+    ucsTlsSupportTls11 = 2 ^ 1
+    ucsTlsSupportTls12 = 2 ^ 2
+    ucsTlsSupportTls13 = 2 ^ 3
+    ucsTlsIgnoreServerCertificateErrors = 2 ^ 4
+    ucsTlsSupportAll = ucsTlsSupportTls10 Or ucsTlsSupportTls11 Or ucsTlsSupportTls12 Or ucsTlsSupportTls13
 End Enum
 
 Private Enum UcsTlsStatesEnum
@@ -361,8 +367,8 @@ Public Type UcsTlsContext
     LastError           As String
     LastErrSource       As String
     LastAlertCode       As UcsTlsAlertDescriptionsEnum
-    AlpnNeedSend        As Boolean
     AlpnNegotiated      As String
+    SniRequested        As String
     '--- handshake
     LocalCertificates   As Collection
     LocalPrivateKey     As Collection
@@ -504,10 +510,7 @@ Public Function TlsHandshake(uCtx As UcsTlsContext, baInput() As Byte, ByVal lSi
     Dim sApiSource      As String
     Dim uConnInfo       As SecPkgContext_ConnectionInfo
     Dim uCipherInfo     As SecPkgContext_CipherInfo
-    Dim baBuffer()      As Byte
-    Dim lPos            As Long
-    Dim sProtocol       As String
-    Dim vElem           As Variant
+    Dim baAlpnBuffer()  As Byte
     Dim uAppProtocol    As SecPkgContext_ApplicationProtocol
     
     On Error GoTo EH
@@ -539,6 +542,10 @@ Public Function TlsHandshake(uCtx As UcsTlsContext, baInput() As Byte, ByVal lSi
 RetryCredentials:
         If .hTlsCredentials = 0 Then
             uCred.dwVersion = SCHANNEL_CRED_VERSION
+            uCred.grbitEnabledProtocols = IIf((.LocalFeatures And ucsTlsSupportTls10) <> 0, SP_PROT_TLS1_0, 0) Or _
+                IIf((.LocalFeatures And ucsTlsSupportTls11) <> 0, SP_PROT_TLS1_1, 0) Or _
+                IIf((.LocalFeatures And ucsTlsSupportTls12) <> 0, SP_PROT_TLS1_2, 0) Or _
+                IIf((.LocalFeatures And ucsTlsSupportTls13) <> 0, SP_PROT_TLS1_3, 0)
             uCred.dwFlags = uCred.dwFlags Or SCH_CRED_MANUAL_CRED_VALIDATION    ' Prevent Schannel from validating the received server certificate chain.
             uCred.dwFlags = uCred.dwFlags Or SCH_CRED_NO_DEFAULT_CREDS          ' Prevent Schannel from attempting to automatically supply a certificate chain for client authentication.
             If pvCollectionCount(.LocalCertificates) > 0 Then
@@ -572,7 +579,12 @@ RetryCredentials:
         If .hTlsContext = 0 Then
             pvInitSecDesc .InDesc, 3, .InBuffers
             pvInitSecDesc .OutDesc, 3, .OutBuffers
-            .AlpnNeedSend = LenB(.AlpnProtocols) <> 0
+            If .IsServer Then
+                pvTlsParseHandshakeClientHello uCtx, baInput, 0
+            End If
+            If LenB(.AlpnProtocols) <> 0 Then
+                pvTlsBuildAlpnBuffer baAlpnBuffer, 0, .AlpnProtocols
+            End If
         End If
         Do
             If .RecvPos > 0 Then
@@ -581,20 +593,8 @@ RetryCredentials:
             Else
                 lPtr = 0
             End If
-            If .AlpnNeedSend Then
-                .AlpnNeedSend = False
-                lPos = pvWriteReserved(baBuffer, 0, 4)
-                lPos = pvWriteBuffer(baBuffer, lPos, VarPtr(SecApplicationProtocolNegotiationExt_ALPN), 4)
-                lPos = pvWriteReserved(baBuffer, lPos, 2)
-                For Each vElem In Split(.AlpnProtocols, "|")
-                    lIdx = Len(vElem)
-                    lPos = pvWriteBuffer(baBuffer, lPos, VarPtr(lIdx), 1)
-                    sProtocol = StrConv(vElem, vbFromUnicode)
-                    lPos = pvWriteBuffer(baBuffer, lPos, StrPtr(sProtocol), Len(vElem))
-                Next
-                pvWriteBuffer baBuffer, 8, VarPtr(lPos - 10), 2
-                pvWriteBuffer baBuffer, 0, VarPtr(lPos - 4), 4
-                pvInitSecBuffer .InBuffers(IIf(lPtr <> 0, 1, 0)), SECBUFFER_APPLICATION_PROTOCOLS, VarPtr(baBuffer(0)), lPos
+            If pvArraySize(baAlpnBuffer) > 0 Then
+                pvInitSecBuffer .InBuffers(IIf(lPtr <> 0, 1, 0)), SECBUFFER_APPLICATION_PROTOCOLS, VarPtr(baAlpnBuffer(0)), UBound(baAlpnBuffer) + 1
                 lPtr = VarPtr(.InDesc)
             End If
             If .IsServer Then
@@ -637,6 +637,7 @@ RetryCredentials:
                     End With
                     pvInitSecBuffer .InBuffers(lIdx), SECBUFFER_EMPTY
                 Next
+                Erase baAlpnBuffer
                 For lIdx = 0 To UBound(.OutBuffers)
                     With .OutBuffers(lIdx)
                         If .cbBuffer > 0 Then
@@ -689,7 +690,8 @@ RetryCredentials:
                                 pvTlsGetAlgName(uConnInfo.aiCipher) & " cipher with " & _
                                 pvTlsGetAlgName(uConnInfo.aiHash) & " hash and " & _
                                 pvTlsGetAlgName(uConnInfo.aiExch) & " key-exchange" & _
-                                IIf(LenB(.AlpnNegotiated) <> 0, " over " & .AlpnNegotiated & " from ALPN", vbNullString)
+                                IIf(LenB(.AlpnNegotiated) <> 0, " over " & .AlpnNegotiated & " (ALPN)", vbNullString) & _
+                                IIf(LenB(.SniRequested) <> 0, " for " & .SniRequested & " (SNI)", vbNullString)
                         End If
                     #End If
                     .State = ucsTlsStatePostHandshake
@@ -726,6 +728,9 @@ RetryCredentials:
                         Replace(Replace(ERR_UNEXPECTED_RESULT, "%1", sApiSource), "%2", "&H" & Hex$(hResult)), AlertCode:=.LastAlertCode
                     GoTo QH
                 End Select
+                If .RecvPos = 0 Then
+                    Exit Do
+                End If
             End If
         Loop
     End With
@@ -743,6 +748,7 @@ Public Function TlsReceive(uCtx As UcsTlsContext, baInput() As Byte, ByVal lSize
     Dim hResult         As Long
     Dim lIdx            As Long
     Dim lPtr            As Long
+    Dim baEmpty()       As Byte
     
     On Error GoTo EH
     With uCtx
@@ -805,7 +811,10 @@ Public Function TlsReceive(uCtx As UcsTlsContext, baInput() As Byte, ByVal lSize
                 '--- do nothing
             Case SEC_I_RENEGOTIATE
                 .State = ucsTlsStateHandshakeStart
-                TlsHandshake uCtx, .RecvBuffer, .RecvPos, .SendBuffer, .SendPos
+                '--- .RecvBuffer is populated already
+                If Not TlsHandshake(uCtx, baEmpty, 0, .SendBuffer, .SendPos) Then
+                    GoTo QH
+                End If
                 Exit Do
             Case SEC_I_CONTEXT_EXPIRED
                 .State = ucsTlsStateShutdown
@@ -1049,6 +1058,8 @@ Private Function pvTlsGetAlgName(ByVal lAlgId As Long) As String
         pvTlsGetAlgName = "TLS1_1_CLIENT"
     Case &H800&
         pvTlsGetAlgName = "TLS1_2_CLIENT"
+    Case &H2000&
+        pvTlsGetAlgName = "TLS1_3_CLIENT"
     Case &H10&
         pvTlsGetAlgName = "SSL3_SERVER"
     Case &H40&
@@ -1057,6 +1068,8 @@ Private Function pvTlsGetAlgName(ByVal lAlgId As Long) As String
         pvTlsGetAlgName = "TLS1_1_SERVER"
     Case &H400&
         pvTlsGetAlgName = "TLS1_2_SERVER"
+    Case &H1000
+        pvTlsGetAlgName = "TLS1_3_SERVER"
     Case &H6602&
         pvTlsGetAlgName = "RC2"
     Case &H6801&
@@ -1098,6 +1111,83 @@ Private Function pvTlsGetAlgName(ByVal lAlgId As Long) As String
     End Select
 End Function
 #End If
+
+Private Function pvTlsBuildAlpnBuffer(baOutput() As Byte, ByVal lPos As Long, sAlpnProtocols As String) As Long
+    Dim vElem           As Variant
+    Dim sProtocol       As String
+    Dim lSize           As Long
+    
+    lPos = pvWriteReserved(baOutput, 0, 4)
+    lPos = pvWriteBuffer(baOutput, lPos, VarPtr(SecApplicationProtocolNegotiationExt_ALPN), 4)
+    lPos = pvWriteReserved(baOutput, lPos, 2)
+    For Each vElem In Split(sAlpnProtocols, "|")
+        vElem = Left$(vElem, 255)
+        lSize = Len(vElem)
+        lPos = pvWriteBuffer(baOutput, lPos, VarPtr(lSize), 1)
+        sProtocol = StrConv(vElem, vbFromUnicode)
+        lPos = pvWriteBuffer(baOutput, lPos, StrPtr(sProtocol), Len(vElem))
+    Next
+    pvWriteBuffer baOutput, 8, VarPtr(lPos - 10), 2
+    pvWriteBuffer baOutput, 0, VarPtr(lPos - 4), 4
+    pvTlsBuildAlpnBuffer = lPos
+End Function
+
+Private Function pvTlsParseHandshakeClientHello(uCtx As UcsTlsContext, baInput() As Byte, ByVal lPos As Long) As Long
+    Const TLS_CONTENT_TYPE_HANDSHAKE                As Long = 22
+    Const TLS_HANDSHAKE_TYPE_CLIENT_HELLO           As Long = 1
+    Dim lValue          As Long
+    Dim lSize           As Long
+    Dim lEnd            As Long
+    Dim baTemp()        As Byte
+    Dim lExtType        As Long
+    Dim lExtSize        As Long
+    Dim lNamePos        As Long
+    Dim lNameType       As Long
+    Dim lNameSize       As Long
+    
+    lPos = pvReadLong(baInput, lPos, lValue)            '--- content type
+    If lValue <> TLS_CONTENT_TYPE_HANDSHAKE Then
+        GoTo QH
+    End If
+    lPos = pvReadLong(baInput, lPos, lValue, Size:=2)   '--- protocol version
+    lPos = lPos + 2                                     '--- skip handshake message size
+    lPos = pvReadLong(baInput, lPos, lValue)            '--- handshake type
+    If lValue <> TLS_HANDSHAKE_TYPE_CLIENT_HELLO Then
+        GoTo QH
+    End If
+    lPos = lPos + 3                                     '--- skip size of client hello
+    lPos = lPos + 2                                     '--- skip Client Version
+    lPos = lPos + 32                                    '--- skip Client Random
+    lPos = pvReadLong(baInput, lPos, lSize, Size:=1)    '--- skip Session ID
+    lPos = lPos + lSize
+    lPos = pvReadLong(baInput, lPos, lSize, Size:=2)    '--- skip Cipher Suites
+    lPos = lPos + lSize
+    lPos = pvReadLong(baInput, lPos, lSize, Size:=1)    '--- skip Compression Methods
+    lPos = lPos + lSize
+    lPos = pvReadLong(baInput, lPos, lSize, Size:=2)    '--- size of Extensions
+    lEnd = lPos + lSize
+    Do While lPos < lEnd And lPos <= UBound(baInput)
+        lPos = pvReadLong(baInput, lPos, lExtType, Size:=2)
+        lPos = pvReadLong(baInput, lPos, lExtSize, Size:=2)
+        Select Case lExtType
+        Case 0 '--- Extension -- Server Name
+            lNamePos = pvReadLong(baInput, lPos, lValue, Size:=2)
+            Do While lNamePos < lPos + lValue
+                lNamePos = pvReadLong(baInput, lNamePos, lNameType, Size:=1)
+                lNamePos = pvReadLong(baInput, lNamePos, lNameSize, Size:=2)
+                If lNameType = 0 Then '--- FQDN
+                    lNamePos = pvReadArray(baInput, lNamePos, baTemp, lNameSize)
+                    uCtx.SniRequested = StrConv(baTemp, vbUnicode)
+                Else
+                    lNamePos = lNamePos + lNameSize
+                End If
+            Loop
+        End Select
+        lPos = lPos + lExtSize
+    Loop
+QH:
+    pvTlsParseHandshakeClientHello = lPos
+End Function
 
 Private Function pvTlsImportToCertStore(cCerts As Collection, cPrivKey As Collection, hMemStore As Long) As Boolean
     Const FUNC_NAME     As String = "pvTlsImportToCertStore"
@@ -1345,6 +1435,10 @@ Private Property Get pvArraySize(baArray() As Byte) As Long
     End If
 End Property
 
+Private Function pvWriteReserved(baBuffer() As Byte, ByVal lPos As Long, ByVal lSize As Long) As Long
+    pvWriteReserved = pvWriteBuffer(baBuffer, lPos, 0, lSize)
+End Function
+
 Private Function pvWriteBuffer(baBuffer() As Byte, ByVal lPos As Long, ByVal lPtr As Long, ByVal lSize As Long) As Long
     Const FUNC_NAME     As String = "pvWriteBuffer"
     Dim lBufPtr         As Long
@@ -1363,8 +1457,42 @@ Private Function pvWriteBuffer(baBuffer() As Byte, ByVal lPos As Long, ByVal lPt
     pvWriteBuffer = lPos + lSize
 End Function
 
-Private Function pvWriteReserved(baBuffer() As Byte, ByVal lPos As Long, ByVal lSize As Long) As Long
-    pvWriteReserved = pvWriteBuffer(baBuffer, lPos, 0, lSize)
+Private Function pvReadLong(baBuffer() As Byte, ByVal lPos As Long, lValue As Long, Optional ByVal Size As Long = 1) As Long
+    Static baTemp(0 To 3) As Byte
+    
+    If lPos + Size <= pvArraySize(baBuffer) Then
+        If Size <= 1 Then
+            lValue = baBuffer(lPos)
+        Else
+            baTemp(Size - 1) = baBuffer(lPos + 0)
+            baTemp(Size - 2) = baBuffer(lPos + 1)
+            If Size >= 3 Then baTemp(Size - 3) = baBuffer(lPos + 2)
+            If Size >= 4 Then baTemp(Size - 4) = baBuffer(lPos + 3)
+            Call CopyMemory(lValue, baTemp(0), Size)
+        End If
+    Else
+        lValue = 0
+    End If
+    pvReadLong = lPos + Size
+End Function
+
+Private Function pvReadArray(baBuffer() As Byte, ByVal lPos As Long, baDest() As Byte, ByVal lSize As Long) As Long
+    Const FUNC_NAME     As String = "pvReadArray"
+    
+    If lSize < 0 Then
+        lSize = pvArraySize(baBuffer) - lPos
+    End If
+    If lSize > 0 Then
+        pvArrayAllocate baDest, lSize, FUNC_NAME & ".baDest"
+        If lPos + lSize <= pvArraySize(baBuffer) Then
+            Call CopyMemory(baDest(0), baBuffer(lPos), lSize)
+        ElseIf lPos < pvArraySize(baBuffer) Then
+            Call CopyMemory(baDest(0), baBuffer(lPos), pvArraySize(baBuffer) - lPos)
+        End If
+    Else
+        Erase baDest
+    End If
+    pvReadArray = lPos + lSize
 End Function
 
 '= Schannel buffers helpers ==============================================
