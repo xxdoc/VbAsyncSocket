@@ -133,7 +133,6 @@ Private Const DUPLICATE_SAME_ACCESS         As Long = 2
 Private Declare Sub CopyMemory Lib "kernel32" Alias "RtlMoveMemory" (Destination As Any, Source As Any, ByVal Length As Long)
 Private Declare Function DuplicateHandle Lib "kernel32" (ByVal hSourceProcessHandle As Long, ByVal hSourceHandle As Long, ByVal hTargetProcessHandle As Long, lpTargetHandle As Long, ByVal dwDesiredAccess As Long, ByVal bInheritHandle As Long, ByVal dwOptions As Long) As Long
 Private Declare Function GetCurrentProcess Lib "kernel32" () As Long
-Private Declare Function ws_closesocket Lib "ws2_32" Alias "closesocket" (ByVal s As Long) As Long
 
 '=========================================================================
 ' Constants and member variables
@@ -172,8 +171,8 @@ End Sub
 '=========================================================================
 
 Property Get LocalPort() As Long
-    If Not m_oSocket Is Nothing Then
-        m_oSocket.GetSockName vbNullString, LocalPort
+    If Not pvSocket Is Nothing Then
+        pvSocket.GetSockName vbNullString, LocalPort
     Else
         LocalPort = m_lLocalPort
     End If
@@ -214,8 +213,8 @@ Property Let RemoteHost(sValue As String)
 End Property
 
 Property Get RemotePort() As Long
-    If Not m_oSocket Is Nothing Then
-        m_oSocket.GetPeerName vbNullString, RemotePort
+    If Not pvSocket Is Nothing Then
+        pvSocket.GetPeerName vbNullString, RemotePort
     Else
         RemotePort = m_lRemotePort
     End If
@@ -295,19 +294,24 @@ Public Sub Accept(ByVal requestID As Long)
     Dim hDuplicate      As Long
     
     On Error GoTo EH
-    If DuplicateHandle(GetCurrentProcess(), requestID, GetCurrentProcess(), hDuplicate, 0, 0, DUPLICATE_SAME_ACCESS) = 0 Then
-        On Error GoTo 0
-        pvSetError Err.LastDllError, RaiseError:=True
-        GoTo QH
+    Set m_oSocket = Nothing
+    If Not g_oRequestSocket Is Nothing Then
+        If g_oRequestSocket.SocketHandle = requestID Then
+            Set m_oSocket = g_oRequestSocket
+        End If
     End If
-    Set m_oSocket = g_oRequestSocket
     If m_oSocket Is Nothing Then
+        If DuplicateHandle(GetCurrentProcess(), requestID, GetCurrentProcess(), hDuplicate, 0, 0, DUPLICATE_SAME_ACCESS) = 0 Then
+            On Error GoTo 0
+            pvSetError Err.LastDllError, RaiseError:=True
+            GoTo QH
+        End If
         Set m_oSocket = New cTlsSocket
-    End If
-    If Not m_oSocket.Attach(hDuplicate) Then
-        On Error GoTo 0
-        pvSetError m_oSocket.LastError, RaiseError:=True
-        GoTo QH
+        If Not m_oSocket.Attach(hDuplicate) Then
+            On Error GoTo 0
+            pvSetError m_oSocket.LastError, RaiseError:=True
+            GoTo QH
+        End If
     End If
 QH:
     Exit Sub
@@ -535,7 +539,6 @@ End Sub
 Private Sub m_oSocket_OnAccept()
     Const FUNC_NAME     As String = "m_oSocket_OnAccept"
     Dim oTemp           As cTlsSocket
-    Dim hSocket         As Long
     
     On Error GoTo EH
     pvState = sckConnectionPending
@@ -546,11 +549,9 @@ Private Sub m_oSocket_OnAccept()
     End If
     Set m_oRequestSocket = oTemp
     Set g_oRequestSocket = oTemp
-    hSocket = oTemp.Detach()
-    RaiseEvent ConnectionRequest(hSocket)
+    RaiseEvent ConnectionRequest(oTemp.SocketHandle)
     Set m_oRequestSocket = Nothing
     Set g_oRequestSocket = Nothing
-    Call ws_closesocket(hSocket)
     pvState = sckListening
 QH:
     Exit Sub
