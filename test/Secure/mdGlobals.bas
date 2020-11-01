@@ -13,12 +13,12 @@ Private Declare Function QueryPerformanceFrequency Lib "kernel32" (lpFrequency A
 
 Private m_oRedimStats               As Object
 
-Public Function DesignDumpArray(baData() As Byte, Optional ByVal lPos As Long, Optional ByVal lSize As Long = -1) As String
-    If lSize < 0 Then
-        lSize = UBound(baData) + 1 - lPos
+Public Function DesignDumpArray(baData() As Byte, Optional ByVal Pos As Long, Optional ByVal Size As Long = -1) As String
+    If Size < 0 Then
+        Size = UBound(baData) + 1 - Pos
     End If
-    If lSize > 0 Then
-        DesignDumpArray = DesignDumpMemory(VarPtr(baData(lPos)), lSize)
+    If Size > 0 Then
+        DesignDumpArray = DesignDumpMemory(VarPtr(baData(Pos)), Size)
     End If
 End Function
 
@@ -185,3 +185,22 @@ Public Sub DebugLog(sModule As String, sFunction As String, sText As String, Opt
         eType = vbLogEventTypeWarning, "[WARN]", _
         True, "[INFO]") & " " & sText & " [" & sModule & "." & sFunction & "]"
 End Sub
+
+Public Function ConcatCollection(oCol As Collection, Optional Separator As String = vbCrLf) As String
+    Dim lSize           As Long
+    Dim vElem           As Variant
+    
+    For Each vElem In oCol
+        lSize = lSize + Len(vElem) + Len(Separator)
+    Next
+    If lSize > 0 Then
+        ConcatCollection = String$(lSize - Len(Separator), 0)
+        lSize = 1
+        For Each vElem In oCol
+            If lSize <= Len(ConcatCollection) Then
+                Mid$(ConcatCollection, lSize, Len(vElem) + Len(Separator)) = vElem & Separator
+            End If
+            lSize = lSize + Len(vElem) + Len(Separator)
+        Next
+    End If
+End Function
