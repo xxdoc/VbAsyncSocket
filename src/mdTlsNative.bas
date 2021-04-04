@@ -92,6 +92,8 @@ Private Const CRYPT_MACHINE_KEYSET                      As Long = &H20
 Private Const AT_KEYEXCHANGE                            As Long = 1
 '--- for CertGetCertificateContextProperty
 Private Const CERT_KEY_PROV_INFO_PROP_ID                As Long = 2
+'--- for CryptImportKey
+Private Const CRYPT_EXPORTABLE                          As Long = 1
 '--- for ALPN
 Private Const SecApplicationProtocolNegotiationExt_ALPN As Long = 2
 Private Const SecApplicationProtocolNegotiationStatus_Success As Long = 1
@@ -110,15 +112,18 @@ Private Const NCRYPTBUFFER_PKCS_KEY_NAME                As Long = 45
 Private Const NCRYPT_OVERWRITE_KEY_FLAG                 As Long = &H80
 
 Private Declare Sub CopyMemory Lib "kernel32" Alias "RtlMoveMemory" (Destination As Any, Source As Any, ByVal Length As Long)
-Private Declare Function ArrPtr Lib "msvbvm60" Alias "VarPtr" (Ptr() As Any) As Long
 Private Declare Function IsBadReadPtr Lib "kernel32" (ByVal lp As Long, ByVal ucb As Long) As Long
 Private Declare Function VirtualProtect Lib "kernel32" (ByVal lpAddress As Long, ByVal dwSize As Long, ByVal flNewProtect As Long, ByRef lpflOldProtect As Long) As Long
 Private Declare Function vbaObjSetAddref Lib "msvbvm60" Alias "__vbaObjSetAddref" (oDest As Any, ByVal lSrcPtr As Long) As Long
 Private Declare Function lstrlen Lib "kernel32" Alias "lstrlenA" (ByVal lpString As Long) As Long
 Private Declare Function lstrlenW Lib "kernel32" (ByVal lpString As Long) As Long
 Private Declare Function LocalFree Lib "kernel32" (ByVal hMem As Long) As Long
-Private Declare Function GetFileVersionInfo Lib "Version" Alias "GetFileVersionInfoA" (ByVal lptstrFilename As String, ByVal dwHandle As Long, ByVal dwLen As Long, lpData As Any) As Long
-Private Declare Function VerQueryValue Lib "Version" Alias "VerQueryValueA" (pBlock As Any, ByVal lpSubBlock As String, lplpBuffer As Any, puLen As Long) As Long
+Private Declare Function FormatMessage Lib "kernel32" Alias "FormatMessageA" (ByVal dwFlags As Long, ByVal lpSource As Long, ByVal dwMessageId As Long, ByVal dwLanguageId As Long, ByVal lpBuffer As String, ByVal nSize As Long, Args As Any) As Long
+'--- msvbvm60
+Private Declare Function ArrPtr Lib "msvbvm60" Alias "VarPtr" (Ptr() As Any) As Long
+'--- version
+Private Declare Function GetFileVersionInfo Lib "version" Alias "GetFileVersionInfoA" (ByVal lptstrFilename As String, ByVal dwHandle As Long, ByVal dwLen As Long, lpData As Any) As Long
+Private Declare Function VerQueryValue Lib "version" Alias "VerQueryValueA" (pBlock As Any, ByVal lpSubBlock As String, lplpBuffer As Any, puLen As Long) As Long
 '--- security
 Private Declare Function AcquireCredentialsHandle Lib "security" Alias "AcquireCredentialsHandleA" (ByVal pszPrincipal As Long, ByVal pszPackage As String, ByVal fCredentialUse As Long, ByVal pvLogonId As Long, pAuthData As Any, ByVal pGetKeyFn As Long, ByVal pvGetKeyArgument As Long, phCredential As Currency, ByVal ptsExpiry As Long) As Long
 Private Declare Function FreeCredentialsHandle Lib "security" (phContext As Currency) As Long
@@ -387,8 +392,6 @@ Public Type UcsTlsContext
     '--- I/O buffers
     RecvBuffer()        As Byte
     RecvPos             As Long
-    SendBuffer()        As Byte
-    SendPos             As Long
 End Type
 
 Private Type UcsKeyInfo
@@ -397,7 +400,7 @@ Private Type UcsKeyInfo
     BitLen              As Long
 End Type
 
-Public g_oRequestSocket             As cTlsSocket
+Public g_oRequestSocket             As Object
 
 '=========================================================================
 ' Properties
@@ -725,6 +728,9 @@ RetryCredentials:
                     End If
                     pvTlsSetLastError uCtx, hResult, MODULE_NAME & "." & FUNC_NAME, AlertCode:=.LastAlertCode
                     GoTo QH
+                Case SEC_I_CONTEXT_EXPIRED
+                    .State = ucsTlsStateShutdown
+                    Exit Do
                 Case Else
                     pvTlsSetLastError uCtx, vbObjectError, MODULE_NAME & "." & FUNC_NAME & vbCrLf & sApiSource, _
                         Replace(Replace(ERR_UNEXPECTED_RESULT, "%1", sApiSource), "%2", "&H" & Hex$(hResult)), AlertCode:=.LastAlertCode
@@ -745,7 +751,7 @@ EH:
     Resume QH
 End Function
 
-Public Function TlsReceive(uCtx As UcsTlsContext, baInput() As Byte, ByVal lSize As Long, baPlainText() As Byte, lPos As Long) As Boolean
+Public Function TlsReceive(uCtx As UcsTlsContext, baInput() As Byte, ByVal lSize As Long, baPlainText() As Byte, lPos As Long, baOutput() As Byte, lOutputPos As Long) As Boolean
     Const FUNC_NAME     As String = "TlsReceive"
     Dim hResult         As Long
     Dim lIdx            As Long
@@ -814,7 +820,7 @@ Public Function TlsReceive(uCtx As UcsTlsContext, baInput() As Byte, ByVal lSize
             Case SEC_I_RENEGOTIATE
                 .State = ucsTlsStateHandshakeStart
                 '--- .RecvBuffer is populated already
-                If Not TlsHandshake(uCtx, baEmpty, 0, .SendBuffer, .SendPos) Then
+                If Not TlsHandshake(uCtx, baEmpty, 0, baOutput, lOutputPos) Then
                     GoTo QH
                 End If
                 Exit Do
@@ -852,16 +858,6 @@ Public Function TlsSend(uCtx As UcsTlsContext, baPlainText() As Byte, ByVal lSiz
             GoTo QH
         End If
         pvTlsSetLastError uCtx
-        If lSize = 0 Then
-            '--- flush
-            If .SendPos > 0 Then
-                lOutputPos = pvWriteBuffer(baOutput, lOutputPos, VarPtr(.SendBuffer(0)), .SendPos)
-                .SendPos = 0
-            End If
-            '--- success
-            TlsSend = True
-            Exit Function
-        End If
         '--- figure out upper bound of total output and reserve space in baOutput
         lIdx = (lSize + .TlsSizes.cbMaximumMessage - 1) \ .TlsSizes.cbMaximumMessage
         pvWriteReserved baOutput, lOutputPos, .TlsSizes.cbHeader * lIdx + lSize + .TlsSizes.cbTrailer * lIdx
@@ -1011,9 +1007,7 @@ Private Sub pvTlsSetLastError( _
         .LastErrSource = ErrSource
         .LastAlertCode = AlertCode
         If ErrNumber <> 0 And LenB(ErrDescription) = 0 Then
-            With New cAsyncSocket
-                uCtx.LastError = .GetErrorDescription(ErrNumber)
-            End With
+            uCtx.LastError = GetSystemMessage(ErrNumber)
             If LenB(.LastError) = 0 Then
                 .LastError = "Error &H" & Hex$(ErrNumber)
             End If
@@ -1246,21 +1240,18 @@ Private Function pvTlsImportToCertStore(cCerts As Collection, cPrivKey As Collec
             lProvType = PROV_RSA_AES
             If CryptAcquireContext(hProv, StrPtr(sKeyName), StrPtr(sProvName), lProvType, CRYPT_MACHINE_KEYSET) = 0 Then
                 If CryptAcquireContext(hProv, StrPtr(sKeyName), StrPtr(sProvName), lProvType, CRYPT_NEWKEYSET Or CRYPT_MACHINE_KEYSET) = 0 Then
-                    '--- do nothing
-                End If
-            End If
-            If hProv = 0 Then
-                sProvName = MS_DEF_PROV
-                lProvType = PROV_RSA_FULL
-                If CryptAcquireContext(hProv, StrPtr(sKeyName), StrPtr(sProvName), lProvType, CRYPT_MACHINE_KEYSET) = 0 Then
-                    If CryptAcquireContext(hProv, StrPtr(sKeyName), StrPtr(sProvName), lProvType, CRYPT_NEWKEYSET Or CRYPT_MACHINE_KEYSET) = 0 Then
-                        hResult = Err.LastDllError
-                        sApiSource = "CryptAcquireContext"
-                        GoTo QH
+                    sProvName = MS_DEF_PROV
+                    lProvType = PROV_RSA_FULL
+                    If CryptAcquireContext(hProv, StrPtr(sKeyName), StrPtr(sProvName), lProvType, CRYPT_MACHINE_KEYSET) = 0 Then
+                        If CryptAcquireContext(hProv, StrPtr(sKeyName), StrPtr(sProvName), lProvType, CRYPT_NEWKEYSET Or CRYPT_MACHINE_KEYSET) = 0 Then
+                            hResult = Err.LastDllError
+                            sApiSource = "CryptAcquireContext"
+                            GoTo QH
+                        End If
                     End If
                 End If
             End If
-            If CryptImportKey(hProv, uPrivKeyInfo.KeyBlob(0), UBound(uPrivKeyInfo.KeyBlob) + 1, 0, 0, hKey) = 0 Then
+            If CryptImportKey(hProv, uPrivKeyInfo.KeyBlob(0), UBound(uPrivKeyInfo.KeyBlob) + 1, 0, CRYPT_EXPORTABLE, hKey) = 0 Then
                 hResult = Err.LastDllError
                 sApiSource = "CryptImportKey"
                 GoTo QH
@@ -1675,4 +1666,19 @@ Private Property Get RealOsVersion() As UcsOsVersionEnum
     End If
     RealOsVersion = lVersion
 End Property
+
+Private Function GetSystemMessage(ByVal lLastDllError As Long) As String
+    Const FORMAT_MESSAGE_FROM_SYSTEM    As Long = &H1000
+    Const FORMAT_MESSAGE_IGNORE_INSERTS As Long = &H200
+    Dim lSize               As Long
+   
+    GetSystemMessage = Space$(2000)
+    lSize = FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM Or FORMAT_MESSAGE_IGNORE_INSERTS, 0, lLastDllError, 0, GetSystemMessage, Len(GetSystemMessage), 0)
+    If lSize > 2 Then
+        If Mid$(GetSystemMessage, lSize - 1, 2) = vbCrLf Then
+            lSize = lSize - 2
+        End If
+    End If
+    GetSystemMessage = Left$(GetSystemMessage, lSize)
+End Function
 #End If

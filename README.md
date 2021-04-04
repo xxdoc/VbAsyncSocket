@@ -6,21 +6,23 @@ Simple and thin WinSock API wrappers for VB6 loosly based on the original [`CAsy
 
 Base class `cAsyncSocket` wraps OS non-blocking sockets that can be used to implement various network components in VB6 -- clients and servers -- and supports both async and blocking network communications.
 
-Additionally there is a source-compatible `cTlsSocket` class for transparent TLS transport layer encryption with a couple of crypto backend implementations:
+Additionally there is a source-compatible `cTlsSocket` class for transparent TLS transport layer encryption with several crypto backend implementations:
 
-1. Pure VB6 backend with ASM crypto thunks implementation for TLS 1.3 and (legacy) TLS 1.2 client-side and server-side (TLS 1.3 only) support with no dependency on external libraries (like openssl)
+1. `mdTlsThunks` is a pure VB6 with ASM thunks implementation for TLS 1.3 and (legacy) TLS 1.2 client-side and server-side (TLS 1.3 only) support with no dependency on external libraries (like openssl)
 
-2. Native client-side and server-side TLS support using OS provided SSPI library for all available protocol versions.
+2. `mdTlsNative` is a native client-side and server-side TLS support using OS provided SSPI/Schannel library for all available protocol versions.
 
-The VB6 with thunks backend optionally can leverage libsodium primitives for performance reasons (e.g. server-side implementations) although current thunks implementation auto-detects AES-NI and PCLMULQDQ instruction set availability on client machine and switches to [performance optimized implementation of AES](https://github.com/wqweto/VbAsyncSocket/blob/4b7f4d8bc650688e2b6ad5460c997ed1df26d2e0/lib/thunks/sshaes.c#L100-L240)[-GCM](https://github.com/wqweto/VbAsyncSocket/blob/4b7f4d8bc650688e2b6ad5460c997ed1df26d2e0/lib/thunks/gf128.c#L116-L165) which is even faster that OS native SSPI implementation of this cyphersuit.
+3. `mdTlsSodium` is a stripped down compact backend with dependency on libsodium for crypto primitives (no ASM thunking used) with a total compiled size of 64KB.
+
+The VB6 with thunks backend implementation auto-detects AES-NI and PCLMULQDQ instruction set availability on client machine and switches to [performance optimized implementation of AES](https://github.com/wqweto/VbAsyncSocket/blob/4b7f4d8bc650688e2b6ad5460c997ed1df26d2e0/lib/thunks/sshaes.c#L100-L240)[-GCM](https://github.com/wqweto/VbAsyncSocket/blob/4b7f4d8bc650688e2b6ad5460c997ed1df26d2e0/lib/thunks/gf128.c#L116-L165) which is even faster that OS native SSPI/Schannel implementation of this cipher suit. The VB6 with thunks backend and native backend support legacy OSes up to NT 4.0 while libsodium DLL is compiled with XP support only.
 
 ### Usage
 
 Start by including `src\cAsyncSocket.cls` in your project to have a convenient wrapper of most WinSock API functions.
 
-Optionally you can add `src\cTlsSocket.cls` and `src\mdTlsThunks.bas` pair of source files to your project for TLS 1.3 secured connections using VB6 with thunks backend or add `src\cTlsSocket.cls` and `src\mdTlsNative.bas` pair of source files for an alternative backend using native OS provided SSPI library.
+Optionally you can add `src\cTlsSocket.cls` and `src\mdTlsThunks.bas` pair of source files to your project for TLS 1.3 secured connections using VB6 with thunks backend or add `src\cTlsSocket.cls` and `src\mdTlsNative.bas` pair of source files for an alternative backend using native OS provided SSPI/Schannel library.
 
-### Sample SMTP with STARTTLS
+#### Sample SMTP with STARTTLS
 
 Here is a working sample with error checking omitted for brevity for accessing smtp.gmail.com over port 587.
 
@@ -49,6 +51,38 @@ Which produces debug output in `Immediate Window` similar to this:
     TLS handshake complete: smtp.gmail.com
     221 2.0.0 closing connection c69sm2955334lfg.23 - gsmtp
 
+### Implemented Cipher Suites
+
+This list includes cipher suites as implemented in the ASM thunks backend while the native backend list depends on the OS version and SSPI/Schannel settings.
+
+Cipher Suite | First&nbsp;In | Selection String | Notes
+--|--|--|--
+TLS_AES_128_GCM_SHA256                          |TLS 1.3|EECDH+AESGCM|AEAD
+TLS_AES_256_GCM_SHA384                          |TLS 1.3|EECDH+AESGCM|AEAD
+TLS_CHACHA20_POLY1305_SHA256                    |TLS 1.3|EECDH+AESGCM|AEAD
+TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256         |TLS 1.2|EECDH+AESGCM|AEAD
+TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256           |TLS 1.2|EECDH+AESGCM|AEAD
+TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384         |TLS 1.2|EECDH+AESGCM|AEAD
+TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384           |TLS 1.2|EECDH+AESGCM|AEAD
+TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256   |TLS 1.2|EECDH+CHACHA20|AEAD
+TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256     |TLS 1.2|EECDH+CHACHA20|AEAD
+TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256         |TLS 1.2|EECDH+AES+SHA256|Exotic
+TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256           |TLS 1.2|EECDH+AES+SHA256|Exotic
+TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384         |TLS 1.2|EECDH+AES+SHA384|Exotic
+TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384           |TLS 1.2|EECDH+AES+SHA384|Exotic
+TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA            |TLSv1|EECDH+AES+SHA1|HMAC-SHA1
+TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA              |TLSv1|EECDH+AES+SHA1|HMAC-SHA1
+TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA            |TLSv1|EECDH+AES+SHA1|HMAC-SHA1
+TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA              |TLSv1|EECDH+AES+SHA1|HMAC-SHA1
+TLS_RSA_WITH_AES_128_GCM_SHA256                 |TLS 1.2|RSA+AESGCM|No FS
+TLS_RSA_WITH_AES_256_GCM_SHA384                 |TLS 1.2|RSA+AESGCM|No FS
+TLS_RSA_WITH_AES_128_CBC_SHA256                 |TLS 1.2|RSA+AES+SHA256|No FS, Exotic
+TLS_RSA_WITH_AES_256_CBC_SHA256                 |TLS 1.2|RSA+AES+SHA256|No FS, Exotic
+TLS_RSA_WITH_AES_128_CBC_SHA                    |SSLv3|RSA+AES+SHA1|No FS, HMAC-SHA1
+TLS_RSA_WITH_AES_256_CBC_SHA                    |SSLv3|RSA+AES+SHA1|No FS, HMAC-SHA1
+
+Note that "exotic" cipher suites are included behind a conditional compilation flag only (off by default).
+
 ### ToDo
 
  - [ ] Allow client to assign client certificate for connection
@@ -56,4 +90,4 @@ Which produces debug output in `Immediate Window` similar to this:
  - [ ] Add wrappers for http and ftp protocols
  - [x] Add WinSock control replacement
  - [ ] Add more samples (incl. `vbcurl.exe` utility)
- - [ ] Refactor subclassing thunk to use msg queue not to re-enter IDE in debug mode
+ - [x] Refactor subclassing thunk to use msg queue not to re-enter IDE in debug mode
